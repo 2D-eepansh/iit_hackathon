@@ -1,7 +1,7 @@
-"""Multi-class composite loss: Focal + Dice for 5-class segmentation.
+"""Multi-class composite loss: Focal + Dice for 4-class segmentation.
 
 Upgraded from plain CrossEntropy to class-weighted Focal Loss to combat
-severe class imbalance (Railway & Bridge are < 0.1% of pixels).
+severe class imbalance (Bridge is < 0.1% of pixels).
 """
 
 import torch
@@ -12,7 +12,7 @@ import torch.nn.functional as F
 class MultiClassDiceLoss(nn.Module):
     """Soft Dice loss averaged across all foreground classes (1–N)."""
 
-    def __init__(self, num_classes: int = 5, smooth: float = 1.0, ignore_index: int = -1) -> None:
+    def __init__(self, num_classes: int = 4, smooth: float = 1.0, ignore_index: int = -1) -> None:
         super().__init__()
         self.num_classes = num_classes
         self.smooth = smooth
@@ -48,9 +48,9 @@ class MultiClassDiceLoss(nn.Module):
 
 
 # ── Default class weights for SVAMITVA imbalance ────────────────────────────
-# [Background, Road, Railway, Bridge, Built-Up]
-# Background is heavily down-weighted; Railway & Bridge boosted 30×.
-SVAMITVA_CLASS_WEIGHTS = torch.tensor([0.1, 1.0, 3.0, 3.0, 1.2])
+# [Background, Road, Bridge, Built-Up]
+# Background is heavily down-weighted; Bridge boosted 30×.
+SVAMITVA_CLASS_WEIGHTS = torch.tensor([0.1, 1.0, 3.0, 1.2])
 
 
 class FocalLoss(nn.Module):
@@ -58,7 +58,7 @@ class FocalLoss(nn.Module):
 
     Applies per-pixel focal scaling  ``alpha * (1 - p_t)^gamma * CE``
     so that well-classified background pixels are down-weighted and rare
-    classes like Railway / Bridge receive stronger gradients.
+    classes like Bridge receive stronger gradients.
     """
 
     def __init__(
@@ -118,7 +118,7 @@ class MultiClassCompositeLoss(nn.Module):
 
     def __init__(
         self,
-        num_classes: int = 5,
+        num_classes: int = 4,
         ce_weight: float = 0.5,
         dice_weight: float = 0.5,
         smooth: float = 1.0,

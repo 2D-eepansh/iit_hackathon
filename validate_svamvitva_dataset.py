@@ -22,17 +22,15 @@ SHP_DIR   = DATA_ROOT / "shp-file"
 
 REQUIRED_SHPS: dict[str, int] = {
     "Road.shp":               1,
-    "Railway.shp":            2,
-    "Bridge.shp":             3,
-    "Built_Up_Area_typ.shp":  4,   # actual on-disk name (truncated)
+    "Bridge.shp":             2,
+    "Built_Up_Area_typ.shp":  3,   # actual on-disk name (truncated)
 }
 
 CLASS_NAMES = {
     0: "Background",
     1: "Road",
-    2: "Railway",
-    3: "Bridge",
-    4: "Built-Up Area",
+    2: "Bridge",
+    3: "Built-Up Area",
 }
 
 PATCH_SIZE      = 512
@@ -256,7 +254,7 @@ def step4_spatial_overlap(raster_metas: list, reprojected_gdfs: dict) -> bool:
                 )
                 overlap_count += 1
             else:
-                # Sparse layers (Railway, Bridge) may legitimately not cover all tiles
+                # Sparse layers (Bridge) may legitimately not cover all tiles
                 print(f"    {CYAN}–{RESET} {shp_name:<30}  no intersection (sparse layer)")
 
         if overlap_count == 0:
@@ -364,7 +362,7 @@ def step5_patch_rasterization(raster_metas: list, reprojected_gdfs: dict) -> Cou
     print(f"  {'Class':<6} {'Name':<18} {'Pixels':>12}  {'%':>6}  Bar")
     print(f"  {'─'*6} {'─'*18} {'─'*12}  {'─'*6}  {'─'*40}")
 
-    for cid in range(5):
+    for cid in range(4):
         count = class_counts.get(cid, 0)
         pct   = 100.0 * count / total
         bar   = "█" * int(pct / 2) + "░" * (50 - int(pct / 2))
@@ -379,11 +377,11 @@ def step5_patch_rasterization(raster_metas: list, reprojected_gdfs: dict) -> Cou
         feature_ids = [c for c in class_counts if c != 0 and class_counts[c] > 0]
         _ok("Feature rasterization", f"Feature classes with pixels: {feature_ids}")
 
-    invalid_vals = [v for v in class_counts if v not in range(5)]
+    invalid_vals = [v for v in class_counts if v not in range(4)]
     if invalid_vals:
-        _fail("Mask value range", f"Values outside 0–4 detected: {invalid_vals}")
+        _fail("Mask value range", f"Values outside 0–3 detected: {invalid_vals}")
     else:
-        _ok("Mask value range", "All values in {0, 1, 2, 3, 4}")
+        _ok("Mask value range", "All values in {0, 1, 2, 3}")
 
     return class_counts
 
@@ -462,9 +460,8 @@ def step6_debug_overlay(raster_metas: list, reprojected_gdfs: dict) -> None:
         COLORS = {
             0: [0.0, 0.0, 0.0],  # background  — transparent
             1: [1.0, 0.0, 0.0],  # road        — red
-            2: [0.0, 1.0, 0.0],  # railway     — green
-            3: [0.0, 0.0, 1.0],  # bridge      — blue
-            4: [1.0, 1.0, 0.0],  # built-up    — yellow
+            2: [0.0, 0.0, 1.0],  # bridge      — blue
+            3: [1.0, 1.0, 0.0],  # built-up    — yellow
         }
         mask_rgb = np.zeros((PATCH_SIZE, PATCH_SIZE, 3), dtype=np.float32)
         for cid, col in COLORS.items():
@@ -474,8 +471,8 @@ def step6_debug_overlay(raster_metas: list, reprojected_gdfs: dict) -> None:
 
         fig, axes = plt.subplots(1, 3, figsize=(18, 6))
         axes[0].imshow(img_display);  axes[0].set_title("TIFF patch");        axes[0].axis("off")
-        axes[1].imshow(mask, cmap="tab10", vmin=0, vmax=4)
-        axes[1].set_title("Rasterized mask (classes 0-4)"); axes[1].axis("off")
+        axes[1].imshow(mask, cmap="tab10", vmin=0, vmax=3)
+        axes[1].set_title("Rasterized mask (classes 0-3)"); axes[1].axis("off")
         plt.colorbar(axes[1].images[0], ax=axes[1])
         axes[2].imshow(blended);      axes[2].set_title("Overlay");           axes[2].axis("off")
 

@@ -1,4 +1,4 @@
-"""Unified multi-source dataset merging PB + CG orthomosaics for full 5-class supervision.
+"""Unified multi-source dataset merging PB + CG orthomosaics for 4-class supervision.
 
 Combines multiple dataset roots (each with its own TIFFs and SHP directory)
 into a single training/validation dataset.  Maintains memory-safe windowed
@@ -8,9 +8,8 @@ patch sampling from the original ``MultiClassDataset``.
 Classes:
     0 = Background
     1 = Road
-    2 = Railway
-    3 = Bridge
-    4 = Built-Up Area
+    2 = Bridge
+    3 = Built-Up Area
 """
 
 from __future__ import annotations
@@ -42,16 +41,14 @@ from src.datasets.multiclass_dataset import get_train_transform, get_val_transfo
 
 PB_CLASS_MAPPING: dict[str, int] = {
     "Road.shp": 1,
-    "Railway.shp": 2,
-    "Bridge.shp": 3,
-    "Built_Up_Area_typ.shp": 4,
+    "Bridge.shp": 2,
+    "Built_Up_Area_typ.shp": 3,
 }
 
 CG_CLASS_MAPPING: dict[str, int] = {
     "Road.shp": 1,
-    "Railway.shp": 2,
-    "Bridge.shp": 3,
-    "Built_Up_Area_type.shp": 4,
+    "Bridge.shp": 2,
+    "Built_Up_Area_type.shp": 3,
 }
 
 # Default dataset sources — each dict describes one orthomosaic collection.
@@ -80,9 +77,8 @@ DEFAULT_SOURCES: list[dict] = [
 CLASS_NAMES: dict[int, str] = {
     0: "Background",
     1: "Road",
-    2: "Railway",
-    3: "Bridge",
-    4: "Built-Up Area",
+    2: "Bridge",
+    3: "Built-Up Area",
 }
 
 
@@ -325,7 +321,7 @@ class UnifiedMultiClassDataset(Dataset):
                     src, entry, tiff_idx, height, width
                 )
             else:
-                image, mask = self._sample_val_patch(src, entry, height, width)
+                image, mask = self._sample_val_patch(src, entry, height, width, idx)
 
         # Augmentation
         if self.transform is not None:
@@ -383,12 +379,18 @@ class UnifiedMultiClassDataset(Dataset):
         return image, mask
 
     def _sample_val_patch(
-        self, src, entry: _TiffEntry, height: int, width: int
+        self, src, entry: _TiffEntry, height: int, width: int, idx: int
     ) -> tuple[np.ndarray, np.ndarray]:
-        """Deterministic centre-crop for validation."""
+        """Deterministic random patch for validation (seeded by sample index).
+
+        Each ``idx`` maps to a unique, reproducible random position so that
+        validation patches cover the full TIFF extent rather than only the
+        centre crop.
+        """
         ps = self.patch_size
-        y = (height - ps) // 2
-        x = (width - ps) // 2
+        rng = np.random.RandomState(seed=idx)
+        y = rng.randint(0, height - ps + 1)
+        x = rng.randint(0, width - ps + 1)
         win = Window(x, y, ps, ps)
         image = src.read([1, 2, 3], window=win).transpose(1, 2, 0).astype(np.uint8)
         mask = self._rasterize_patch(win, src.transform, entry.layers)

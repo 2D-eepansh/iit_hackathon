@@ -34,7 +34,7 @@ def create_model(
         encoder_weights=encoder_weights,
         in_channels=in_channels,
         classes=classes,
-        activation=None,  # No activation for BCEWithLogitsLoss
+        activation=None,  # Raw logits (softmax applied in loss / argmax at inference)
     )
     
     # Optional gradient checkpointing

@@ -173,9 +173,8 @@ def compute_metrics_batch(
 CLASS_NAMES = {
     0: "Background",
     1: "Road",
-    2: "Railway",
-    3: "Bridge",
-    4: "Built-Up Area",
+    2: "Bridge",
+    3: "Built-Up Area",
 }
 
 
@@ -185,19 +184,21 @@ def validate_multiclass(
     dataloader: DataLoader,
     criterion: nn.Module,
     device: torch.device,
-    num_classes: int = 5,
+    num_classes: int = 4,
 ) -> dict[str, float]:
     """
     Validate model for multi-class segmentation with per-class IoU breakdown.
 
     Accumulates global intersection / union per class across all batches for
     accurate IoU computation, then prints a per-class breakdown table.
+    Classes with zero ground-truth pixels are excluded from macro mIoU.
 
     Args:
         model: Segmentation model with num_classes output channels.
         dataloader: Validation dataloader (masks are long tensors).
         criterion: Multi-class loss function.
         device: Device to validate on.
+        num_classes: Total number of classes including background.
         num_classes: Total number of classes including background.
 
     Returns:
@@ -267,44 +268,3 @@ def validate_multiclass(
         "per_class_iou":  per_class_iou,
         "per_class_dice": per_class_dice,
     }
-
-
-def compute_multiclass_metrics(
-    preds: torch.Tensor,
-    targets: torch.Tensor,
-    num_classes: int = 5,
-    smooth: float = 1e-6,
-) -> tuple[float, float]:
-    """
-    Compute mean IoU and mean Dice over foreground classes (1..C-1).
-
-    Args:
-        preds:       (B, H, W) predicted class indices.
-        targets:     (B, H, W) ground truth class indices (long).
-        num_classes: Total classes including background.
-        smooth:      Smoothing to avoid division by zero.
-
-    Returns:
-        Tuple of (mean_iou, mean_dice) over foreground classes.
-    """
-    iou_list, dice_list = [], []
-
-    for c in range(1, num_classes):        # skip background class 0
-        p = (preds == c).float().flatten(1)
-        t = (targets == c).float().flatten(1)
-
-        intersection = (p * t).sum(dim=1)
-        union = p.sum(dim=1) + t.sum(dim=1) - intersection
-        cardinality = p.sum(dim=1) + t.sum(dim=1)
-
-        # Only average over samples where the class is present
-        iou_list.append(
-            ((intersection + smooth) / (union + smooth)).mean().item()
-        )
-        dice_list.append(
-            ((2.0 * intersection + smooth) / (cardinality + smooth)).mean().item()
-        )
-
-    mean_iou = sum(iou_list) / len(iou_list) if iou_list else 0.0
-    mean_dice = sum(dice_list) / len(dice_list) if dice_list else 0.0
-    return mean_iou, mean_dice

@@ -65,7 +65,7 @@ def export_onnx(
         encoder_name=config.get("encoder_name", "efficientnet-b4"),
         encoder_weights=None,
         in_channels=3,
-        classes=1,
+        classes=config.get("classes", 4),
     )
     
     model.load_state_dict(checkpoint["model_state_dict"])

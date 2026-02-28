@@ -1,10 +1,12 @@
 """Main training script for SVAMITVA multi-class feature extraction."""
 
 import os
+import random
 import sys
 import time
 from pathlib import Path
 
+import numpy as np
 import torch
 from torch.amp import GradScaler
 from torch.utils.data import DataLoader
@@ -57,7 +59,8 @@ CONFIG = {
     "architecture": "Unet",
     "encoder_name": "efficientnet-b4",
     "encoder_weights": "imagenet",
-    "classes": 5,              # 0=Background, 1=Road, 2=Railway, 3=Bridge, 4=Built-Up
+    "classes": 4,              # 0=Background, 1=Road, 2=Bridge, 3=Built-Up
+    "seed": 42,
     "use_gradient_checkpointing": False,
 
     # Loss
@@ -75,12 +78,28 @@ CONFIG = {
 }
 
 
+def set_seed(seed: int = 42) -> None:
+    """Set random seeds for full reproducibility."""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+
+def _worker_init_fn(worker_id: int) -> None:
+    """Seed each DataLoader worker for reproducibility."""
+    base_seed = torch.initial_seed() % 2**32
+    np.random.seed(base_seed + worker_id)
+    random.seed(base_seed + worker_id)
+
+
 def setup_cuda_optimizations() -> None:
     """Enable CUDA optimizations for better performance."""
     if torch.cuda.is_available():
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
-        torch.backends.cudnn.benchmark = True
 
 
 def create_dataloaders(config: dict) -> tuple[DataLoader, DataLoader]:
@@ -129,6 +148,7 @@ def create_dataloaders(config: dict) -> tuple[DataLoader, DataLoader]:
         persistent_workers=pw,
         prefetch_factor=pf,
         drop_last=True,
+        worker_init_fn=_worker_init_fn,
     )
 
     val_loader = DataLoader(
@@ -139,6 +159,7 @@ def create_dataloaders(config: dict) -> tuple[DataLoader, DataLoader]:
         pin_memory=True,
         persistent_workers=pw,
         prefetch_factor=pf,
+        worker_init_fn=_worker_init_fn,
     )
 
     return train_loader, val_loader
@@ -149,6 +170,7 @@ def main() -> None:
     config = CONFIG
 
     # Setup
+    set_seed(config["seed"])
     setup_cuda_optimizations()
     Path(config["output_dir"]).mkdir(exist_ok=True)
     Path(config["checkpoint_dir"]).mkdir(exist_ok=True)
@@ -164,7 +186,7 @@ def main() -> None:
         print(f"CUDA:          {torch.version.cuda}")
     print(f"Dataset:       Unified PB + CG ({len(TRAIN_TIFFS)} train, {len(VAL_TIFFS)} val TIFFs)")
     print(f"Classes:       {config['classes']}  "
-          "(0=BG, 1=Road, 2=Railway, 3=Bridge, 4=Built-Up Area)")
+          "(0=BG, 1=Road, 2=Bridge, 3=Built-Up Area)")
     print(f"Image size:    {config['image_size']}")
     print(f"Batch size:    {config['batch_size']}")
     print(f"Epochs:        {config['num_epochs']}")

@@ -21,7 +21,7 @@ def load_model(checkpoint_path: str, device: torch.device) -> torch.nn.Module:
         encoder_name=config.get("encoder_name", "efficientnet-b4"),
         encoder_weights=None,  # Don't load pretrained
         in_channels=3,
-        classes=1,
+        classes=config.get("classes", 4),
     )
     
     model.load_state_dict(checkpoint["model_state_dict"])
@@ -66,9 +66,11 @@ def predict(
     with autocast(device_type="cuda"):
         logits = model(image_tensor)
     
-    # Sigmoid + threshold
-    probs = torch.sigmoid(logits)
-    mask = (probs > threshold).squeeze().cpu().numpy().astype(np.uint8) * 255
+    if logits.shape[1] > 1:
+        mask = logits.argmax(dim=1).squeeze().cpu().numpy().astype(np.uint8)
+    else:
+        probs = torch.sigmoid(logits)
+        mask = (probs > threshold).squeeze().cpu().numpy().astype(np.uint8) * 255
     
     return mask
 

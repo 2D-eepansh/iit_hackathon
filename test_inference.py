@@ -44,9 +44,8 @@ DEVICE       = "cuda" if torch.cuda.is_available() else "cpu"
 CLASS_NAMES = {
     0: "Background",
     1: "Road",
-    2: "Railway",
-    3: "Bridge",
-    4: "Built-Up Area",
+    2: "Bridge",
+    3: "Built-Up Area",
 }
 
 COLORS = np.array([
@@ -128,7 +127,7 @@ def predict_tiff(model: torch.nn.Module, tif_path: Path, device: str) -> tuple:
         print(f"\n  Raster: {tif_path.name}")
         print(f"  Size: {h}×{w}  Bands: {bands}  CRS: {crs}")
 
-        num_classes = 5
+        num_classes = 4
         stride = PATCH_SIZE - OVERLAP
 
         # Process in horizontal strips of PATCH_SIZE height
@@ -274,7 +273,7 @@ def save_visualisation(
     axes[0].set_title("Input Orthomosaic", fontsize=13)
     axes[0].axis("off")
 
-    im = axes[1].imshow(mask_small, cmap="tab10", vmin=0, vmax=4)
+    im = axes[1].imshow(mask_small, cmap="tab10", vmin=0, vmax=3)
     axes[1].set_title("Predicted Segmentation Mask", fontsize=13)
     axes[1].axis("off")
     plt.colorbar(im, ax=axes[1], fraction=0.046, pad=0.04)
@@ -285,7 +284,7 @@ def save_visualisation(
 
     legend_elements = [
         Patch(facecolor=np.array(COLORS[i]) / 255.0, label=f"{i} — {CLASS_NAMES[i]}")
-        for i in range(5)
+        for i in range(4)
     ]
     axes[2].legend(handles=legend_elements, loc="lower right", fontsize=9,
                    framealpha=0.8)
@@ -305,7 +304,7 @@ def print_class_stats(pred_mask: np.ndarray, tif_name: str) -> None:
     total = pred_mask.size
     print(f"\n    {'Class':<6} {'Name':<18} {'Pixels':>12}  {'%':>7}")
     print(f"    {'─'*6} {'─'*18} {'─'*12}  {'─'*7}")
-    for cid in range(5):
+    for cid in range(4):
         count = int((pred_mask == cid).sum())
         pct   = 100.0 * count / total
         bar   = "█" * int(pct / 2) + "░" * (50 - int(pct / 2))

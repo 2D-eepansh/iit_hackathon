@@ -1,61 +1,95 @@
-# Building Segmentation - Phase 1: Foundation Training Pipeline
+# SVAMITVA — Multi-Class Geospatial Feature Segmentation
 
-Production-grade semantic segmentation for building detection in aerial imagery.
+Semantic segmentation pipeline for detecting **Road**, **Bridge**, and **Built-Up Area**
+features from high-resolution drone orthomosaics, developed for the
+**Survey of Villages Abadi and Mapping with Improvised Technology in Village Areas (SVAMITVA)** scheme.
+
+## Classes
+
+| ID | Class | Colour (in visualisations) |
+|----|-------|---------------------------|
+| 0 | Background | Black |
+| 1 | Road | Red |
+| 2 | Bridge | Blue |
+| 3 | Built-Up Area | Yellow |
 
 ## Architecture
 
-- **Model**: U-Net with EfficientNet-B4 encoder (segmentation_models_pytorch)
-- **Loss**: Composite BCE + Dice Loss
-- **Optimizer**: AdamW with differential learning rates
-- **Scheduler**: CosineAnnealingLR
-- **Training**: Mixed Precision (AMP) with gradient clipping
+| Component | Detail |
+|-----------|--------|
+| **Backbone** | U-Net with EfficientNet-B4 encoder (ImageNet pretrained) |
+| **Loss** | Focal Loss (γ=2.0, per-class α) + Soft Dice, weighted 0.5 / 0.5 |
+| **Optimiser** | AdamW with differential learning rates (encoder 3e-5, decoder 1e-4) |
+| **Scheduler** | ReduceLROnPlateau (patience=3, factor=0.5, monitors val mIoU) |
+| **Training** | Mixed-Precision (AMP) with gradient clipping (max norm 1.0) |
+| **Reproducibility** | Fixed seeds (`torch`, `numpy`, `random`, CUDA), deterministic cuDNN |
+
+## Dataset
+
+The unified dataset merges **two sources** of SVAMITVA orthomosaic data:
+
+| Source | Region | CRS | TIFFs | Key Features |
+|--------|--------|-----|-------|--------------|
+| **PB** | Punjab | EPSG:32643 | 3 | Road, Built-Up (high density) |
+| **CG** | Chhattisgarh | EPSG:32644 | 3 valid | Road, Bridge, Built-Up |
+
+### Data Handling
+
+- **Windowed raster reading** via rasterio — memory-safe, no full TIFF loading
+- **On-the-fly CRS reprojection** of SHP annotations to match each TIFF's native CRS
+- **On-the-fly rasterization** of vector geometries to pixel masks per patch
+- **Minority-aware centroid sampling** — 50% of train patches centred on feature centroids
+
+### Train / Val Split
+
+Split is at the **TIFF level** (no spatial leakage):
+
+| Split | TIFFs |
+|-------|-------|
+| Train | `PINDORI MAYA SINGH-TUGALWAL_28456`, `TIMMOWAL_37695`, `BADETUMNAR_…`, `MURDANDA_…` |
+| Val | `28996_NADALA`, `NAGUL_…` |
+
+Validation patches are **deterministic random samples** (seeded by index) spread across
+the entire TIFF extent — not limited to a single centre crop.
 
 ## Project Structure
 
 ```
-iit_hackathon/
-├── configs/                      # Configuration files
-├── data/
-│   ├── raw/
-│   │   └── AerialImageDataset/  # Place dataset here
-│   │       ├── train/
-│   │       │   ├── images/      # Training images (.tif/.png)
-│   │       │   └── gt/          # Ground truth masks (255=building)
-│   │       └── test/
-│   ├── processed/               # Preprocessed data
-│   └── splits/                  # Train/val split indices
+├── train.py                           # Main training entry point
+├── test_inference.py                  # Multi-class inference on test TIFFs
+├── validate_svamvitva_dataset.py      # Pre-training dataset health check
+├── audit_dataset.py                   # Dataset structure audit
+├── analyze_training.py                # Post-training checkpoint analysis
 ├── src/
 │   ├── datasets/
-│   │   └── building_dataset.py  # Dataset loader with albumentations
-│   ├── models/
-│   │   └── model_factory.py     # Model instantiation
+│   │   ├── unified_dataset.py         # Unified PB + CG dataset loader
+│   │   └── multiclass_dataset.py      # Single-source dataset (shared transforms)
 │   ├── losses/
-│   │   └── composite_loss.py    # BCE + Dice loss
+│   │   └── multiclass_loss.py         # Focal + Dice composite loss
+│   ├── models/
+│   │   └── model_factory.py           # smp model factory
 │   ├── training/
-│   │   └── train_one_epoch.py   # Training/validation logic
-│   └── inference/               # Inference scripts (Phase 2)
-├── outputs/
-│   └── checkpoints/             # Model checkpoints
-├── notebooks/                    # Jupyter notebooks
-├── train.py                      # Main training entry point
-└── requirements.txt              # Python dependencies
+│   │   └── train_one_epoch.py         # Train / validate loops with per-class IoU
+│   └── inference/
+│       ├── evaluate.py                # Standalone evaluation script
+│       ├── predict.py                 # Single-image inference
+│       ├── visualize.py               # Overlay visualisation
+│       └── export_model.py            # ONNX / weight export
+├── _legacy/                           # Archived Phase-1 files (not used)
+├── outputs/checkpoints/               # Saved model checkpoints (.gitignored)
+├── data/                              # Raw + processed data (.gitignored)
+└── requirements.txt
 ```
-
-## Dataset Format
-
-Inria-style aerial imagery dataset:
-- **Images**: RGB aerial photos in `train/images/`
-- **Masks**: Binary masks in `train/gt/` (0=background, 255=building)
-- Supported formats: `.tif`, `.png`
 
 ## Installation
 
 ```bash
-# Activate virtual environment
+python -m venv venv
 source venv/bin/activate
-
-# Install dependencies (already done if requirements.txt used)
 pip install -r requirements.txt
+
+# PyTorch — install the version matching your CUDA:
+# https://pytorch.org/get-started/locally/
 ```
 
 ## Usage
@@ -66,58 +100,46 @@ pip install -r requirements.txt
 python train.py
 ```
 
-### Configuration (inline in train.py)
+Configuration is centralised in the `CONFIG` dict inside `train.py`.
+Key settings: `image_size=512`, `batch_size=4`, `num_epochs=50`, `seed=42`.
 
-```python
-data_root = "data/raw/AerialImageDataset"
-image_size = 512
-batch_size = 8
-num_epochs = 5
-learning_rate = 1e-4
-encoder_lr = 1e-5
+### Inference on Test TIFFs
+
+```bash
+python test_inference.py
 ```
 
-## Training Features
+Outputs GeoTIFF masks + PNG visualisations to `outputs/test_predictions_live_demo/`.
 
-- ✅ Automatic train/val split (80/20)
-- ✅ Data augmentation (flip, rotate, color jitter)
-- ✅ Mixed precision training (AMP)
-- ✅ Gradient clipping
-- ✅ Best model checkpointing based on IoU
-- ✅ ImageNet normalization
-- ✅ GPU optimization (pin_memory, non_blocking transfers)
+### Dataset Validation
 
-## Metrics
+```bash
+python validate_svamvitva_dataset.py
+```
 
-- **IoU** (Intersection over Union)
-- **Dice Coefficient**
-- **BCE + Dice Loss**
+## Evaluation Methodology
 
-## Output
+- **Per-class IoU** accumulated globally across all validation patches (not batch-averaged)
+- **Macro FG mIoU** computed only over classes with >0 ground-truth pixels
+  - Classes absent from the validation set are explicitly excluded and reported
+- **Per-class Dice** reported alongside IoU for completeness
 
-Checkpoints saved to `outputs/checkpoints/`:
-- `best_model.pth` - Best validation IoU
-- `latest_model.pth` - Latest epoch
+## Class Weights (Focal Loss α)
 
-## Hardware Requirements
+| Class | Weight | Rationale |
+|-------|--------|-----------|
+| Background | 0.1 | Down-weighted (dominant class) |
+| Road | 1.0 | Baseline |
+| Bridge | 3.0 | Rare class (~15 features total) |
+| Built-Up | 1.2 | Slightly boosted |
 
-- GPU: NVIDIA RTX 5070 (8GB VRAM) or equivalent
-- CUDA 13+
-- Ubuntu (WSL2 compatible)
+## Known Dataset Limitations
 
-## Phase 1 Completion Checklist
+1. **Bridge scarcity** — only ~15 bridge features across all TIFFs; per-class IoU may be volatile
+2. **Geographic bias** — PB (Punjab) and CG (Chhattisgarh) have different terrain/architecture styles
+3. **Corrupt TIFFs** — 2 CG TIFFs (KUTRU, SAMLUR) have corrupted headers and are auto-skipped
+4. **Validation coverage** — 2 val TIFFs provide limited geographic diversity
 
-- [x] Dataset loader with albumentations
-- [x] U-Net with EfficientNet-B4 encoder
-- [x] Composite BCE + Dice loss
-- [x] Training loop with AMP
-- [x] Validation with IoU/Dice metrics
-- [x] Checkpoint saving
-- [x] Modular code structure
-- [x] Type hints and docstrings
+## License
 
-## Next Steps (Future Phases)
-
-- Phase 2: Advanced training (patch sampling, TTA, boundary loss)
-- Phase 3: Inference pipeline with tiling
-- Phase 4: Experiment tracking and hyperparameter tuning
+This project was developed for the IIT Hackathon / SVAMITVA competition.
