@@ -187,6 +187,7 @@ def main() -> None:
     print(f"Dataset:       Unified PB + CG ({len(TRAIN_TIFFS)} train, {len(VAL_TIFFS)} val TIFFs)")
     print(f"Classes:       {config['classes']}  "
           "(0=BG, 1=Road, 2=Bridge, 3=Built-Up Area)")
+    print("Active classes:", ["Background", "Road", "Bridge", "Built-Up"])
     print(f"Image size:    {config['image_size']}")
     print(f"Batch size:    {config['batch_size']}")
     print(f"Epochs:        {config['num_epochs']}")

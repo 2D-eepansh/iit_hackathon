@@ -67,9 +67,8 @@ class MultiClassDataset(Dataset):
             self.shp_dir = self.data_root / "shp-file"
             self.class_mapping = {
                 "Road.shp": 1,
-                "Railway.shp": 2,
-                "Bridge.shp": 3,
-                "Built_Up_Area_typ.shp": 4,   # actual filename on disk (truncated)
+                "Bridge.shp": 2,
+                "Built_Up_Area_typ.shp": 3,   # actual filename on disk (truncated)
             }
         else:
             # Inria / AerialImageDataset layout: split/images subdir
@@ -77,9 +76,8 @@ class MultiClassDataset(Dataset):
             self.shp_dir = Path("data/Raz/CG_shp-file/shp-file")
             self.class_mapping = {
                 "Road.shp": 1,
-                "Railway.shp": 2,
-                "Bridge.shp": 3,
-                "Built_Up_Area_type.shp": 4,
+                "Bridge.shp": 2,
+                "Built_Up_Area_type.shp": 3,
             }
 
         if not self.shp_dir.exists():

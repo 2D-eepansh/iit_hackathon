@@ -51,9 +51,8 @@ CLASS_NAMES = {
 COLORS = np.array([
     [0,   0,   0],      # 0 background   — black
     [255, 0,   0],      # 1 road         — red
-    [0,   255, 0],      # 2 railway      — green
-    [0,   0,   255],    # 3 bridge       — blue
-    [255, 255, 0],      # 4 built-up     — yellow
+    [0,   0,   255],    # 2 bridge       — blue
+    [255, 255, 0],      # 3 built-up     — yellow
 ], dtype=np.uint8)
 
 IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)

@@ -213,6 +213,11 @@ def validate_multiclass(
     global_intersection = torch.zeros(num_classes, device=device, dtype=torch.float64)
     global_union = torch.zeros(num_classes, device=device, dtype=torch.float64)
     global_cardinality = torch.zeros(num_classes, device=device, dtype=torch.float64)
+    global_gt_pixels = torch.zeros(num_classes, device=device, dtype=torch.float64)
+
+    # Sanity-check accumulators for unique class tracking
+    all_unique_preds = set()
+    all_unique_gt = set()
 
     for images, masks in dataloader:
         images = images.to(device, non_blocking=True)
@@ -224,6 +229,10 @@ def validate_multiclass(
 
         preds = logits.argmax(dim=1)                  # (B, H, W)
 
+        # Debug: track unique classes seen
+        all_unique_preds.update(torch.unique(preds).cpu().tolist())
+        all_unique_gt.update(torch.unique(masks).cpu().tolist())
+
         # Accumulate per-class intersection and union across batches
         for c in range(num_classes):
             p = (preds == c).float()
@@ -232,12 +241,17 @@ def validate_multiclass(
             global_intersection[c] += inter
             global_union[c] += p.sum() + t.sum() - inter
             global_cardinality[c] += p.sum() + t.sum()
+            global_gt_pixels[c] += t.sum()
 
         running_loss += loss.item()
         num_batches += 1
 
     n = max(num_batches, 1)
     smooth = 1e-6
+
+    # ── Sanity prints ────────────────────────────────────────────────────────
+    print(f"\n  Unique predicted classes: {sorted(all_unique_preds)}")
+    print(f"  Unique GT classes:       {sorted(all_unique_gt)}")
 
     # ── Per-class IoU and Dice from global accumulators ──────────────────────
     per_class_iou: dict[int, float] = {}
@@ -248,9 +262,18 @@ def validate_multiclass(
         per_class_iou[c] = iou_c.item()
         per_class_dice[c] = dice_c.item()
 
-    # Foreground-only macro average (classes 1 .. C-1)
-    fg_ious = [per_class_iou[c] for c in range(1, num_classes)]
-    fg_dices = [per_class_dice[c] for c in range(1, num_classes)]
+    # Foreground-only macro average — exclude classes with zero GT pixels
+    excluded_classes: list[str] = []
+    fg_ious: list[float] = []
+    fg_dices: list[float] = []
+    for c in range(1, num_classes):
+        gt_px = global_gt_pixels[c].item()
+        if gt_px < 1.0:
+            excluded_classes.append(CLASS_NAMES.get(c, f"Class {c}"))
+        else:
+            fg_ious.append(per_class_iou[c])
+            fg_dices.append(per_class_dice[c])
+
     macro_miou = sum(fg_ious) / len(fg_ious) if fg_ious else 0.0
     macro_mdice = sum(fg_dices) / len(fg_dices) if fg_dices else 0.0
 
@@ -258,7 +281,10 @@ def validate_multiclass(
     print("\n  Per-Class IoU Breakdown:")
     for c in range(1, num_classes):
         name = CLASS_NAMES.get(c, f"Class {c}")
-        print(f"    {name:14s}:  IoU={per_class_iou[c]:.4f}   Dice={per_class_dice[c]:.4f}")
+        gt_px = int(global_gt_pixels[c].item())
+        print(f"    {name:14s}:  IoU={per_class_iou[c]:.4f}   Dice={per_class_dice[c]:.4f}   GT={gt_px:,}px")
+    if excluded_classes:
+        print(f"    Excluded from macro mIoU (no GT pixels): {excluded_classes}")
     print(f"    {'Macro FG':14s}:  mIoU={macro_miou:.4f}  mDice={macro_mdice:.4f}")
 
     return {
