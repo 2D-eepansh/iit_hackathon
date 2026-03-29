@@ -358,8 +358,8 @@ def main() -> None:
             ema=ema,
         )
 
-        # Validate using EMA weights (smoother, more stable)
-        ema.apply_shadow(model)
+        # Validate using actual model weights (clean signal for LR scheduler)
+        # EMA weights are used only for saving the best checkpoint
         val_metrics = validate_multiclass(
             model=model,
             dataloader=val_loader,
@@ -370,7 +370,6 @@ def main() -> None:
             use_road_refinement=config.get("use_road_refinement", False),
             use_tta=config.get("use_tta", False),
         )
-        ema.restore(model)
 
         # Update scheduler
         if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
@@ -415,7 +414,7 @@ def main() -> None:
         # Print metrics
         print(f"\nTrain Loss:  {train_metrics['train_loss']:.4f}")
         print(f"Val Loss:    {val_metrics['val_loss']:.4f}")
-        print(f"Val mIoU:    {val_metrics['val_iou']:.4f}  (EMA)")
+        print(f"Val mIoU:    {val_metrics['val_iou']:.4f}  (best checkpoint: EMA)")
         print(f"Val mDice:   {val_metrics['val_dice']:.4f}")
         print(f"Epoch Time:  {epoch_elapsed:.1f}s (train={train_metrics['train_time']:.1f}s)")
         print(f"GPU Memory:  {mem_allocated:.2f}GB / {mem_reserved:.2f}GB")

@@ -65,7 +65,7 @@ def train_one_epoch(
             scaler.update()
             optimizer.zero_grad(set_to_none=True)
             if ema is not None:
-                ema.update(model)  # per-step EMA update (decay=0.999 meaningful at this granularity)
+                ema.update(model)  # per-step EMA update
         
         running_loss += loss.item() * accumulation_steps
     
