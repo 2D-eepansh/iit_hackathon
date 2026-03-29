@@ -2,11 +2,14 @@
 
 import time
 
+import cv2
+import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.amp import GradScaler, autocast
 from torch.utils.data import DataLoader
-from tqdm import tqdm
+from src.datasets.unified_dataset import CLASS_NAMES
 
 
 def train_one_epoch(
@@ -18,6 +21,7 @@ def train_one_epoch(
     device: torch.device,
     max_grad_norm: float = 1.0,
     accumulation_steps: int = 1,
+    ema=None,
 ) -> dict[str, float]:
     """
     Train model for one epoch with optimized settings.
@@ -60,6 +64,8 @@ def train_one_epoch(
             scaler.step(optimizer)
             scaler.update()
             optimizer.zero_grad(set_to_none=True)
+            if ema is not None:
+                ema.update(model)  # per-step EMA update
         
         running_loss += loss.item() * accumulation_steps
     
@@ -70,6 +76,8 @@ def train_one_epoch(
         scaler.step(optimizer)
         scaler.update()
         optimizer.zero_grad(set_to_none=True)
+        if ema is not None:
+            ema.update(model)
     
     epoch_time = time.time() - start_time
     mean_loss = running_loss / len(dataloader)
@@ -80,103 +88,9 @@ def train_one_epoch(
     }
 
 
-@torch.no_grad()
-def validate(
-    model: nn.Module,
-    dataloader: DataLoader,
-    criterion: nn.Module,
-    device: torch.device,
-    threshold: float = 0.5,
-) -> dict[str, float]:
-    """
-    Validate model with vectorized metrics.
-
-    Args:
-        model: Segmentation model.
-        dataloader: Validation dataloader.
-        criterion: Loss function.
-        device: Device to validate on.
-        threshold: Threshold for binary prediction.
-
-    Returns:
-        Dictionary with validation metrics.
-    """
-    model.eval()
-    running_loss = 0.0
-    total_iou = 0.0
-    total_dice = 0.0
-    num_batches = 0
-    
-    for images, masks in dataloader:
-        images = images.to(device, non_blocking=True)
-        masks = masks.to(device, non_blocking=True)
-        
-        # Forward pass
-        with autocast(device_type="cuda"):
-            logits = model(images)
-            loss = criterion(logits, masks)
-        
-        # Compute predictions once
-        probs = torch.sigmoid(logits)
-        preds = (probs > threshold).float()
-        
-        # Vectorized metrics on GPU
-        iou, dice = compute_metrics_batch(preds, masks)
-        
-        running_loss += loss.item()
-        total_iou += iou
-        total_dice += dice
-        num_batches += 1
-    
-    return {
-        "val_loss": running_loss / num_batches,
-        "val_iou": total_iou / num_batches,
-        "val_dice": total_dice / num_batches,
-    }
-
-
-def compute_metrics_batch(
-    preds: torch.Tensor,
-    targets: torch.Tensor,
-    smooth: float = 1e-6,
-) -> tuple[float, float]:
-    """
-    Compute IoU and Dice in single pass (vectorized, GPU).
-
-    Args:
-        preds: Predicted binary masks (B, C, H, W).
-        targets: Ground truth masks (B, C, H, W).
-        smooth: Smoothing constant.
-
-    Returns:
-        Tuple of (iou, dice) scores.
-    """
-    # Flatten spatial dimensions
-    preds_flat = preds.flatten(1)
-    targets_flat = targets.flatten(1)
-    
-    # Compute metrics
-    intersection = (preds_flat * targets_flat).sum(dim=1)
-    union = preds_flat.sum(dim=1) + targets_flat.sum(dim=1) - intersection
-    cardinality = preds_flat.sum(dim=1) + targets_flat.sum(dim=1)
-    
-    iou = ((intersection + smooth) / (union + smooth)).mean()
-    dice = ((2.0 * intersection + smooth) / (cardinality + smooth)).mean()
-    
-    return iou.item(), dice.item()
-
-
 # ─────────────────────────────────────────────────────────────────────────────
-# Multi-class equivalents (used by SVAMITVA / MultiClassDataset pipeline)
+# Multi-class validation (used by SVAMITVA / UnifiedMultiClassDataset pipeline)
 # ─────────────────────────────────────────────────────────────────────────────
-
-CLASS_NAMES = {
-    0: "Background",
-    1: "Road",
-    2: "Railway",
-    3: "Bridge",
-    4: "Built-Up Area",
-}
 
 
 @torch.no_grad()
@@ -185,13 +99,17 @@ def validate_multiclass(
     dataloader: DataLoader,
     criterion: nn.Module,
     device: torch.device,
-    num_classes: int = 5,
+    num_classes: int = 4,
+    use_multiscale: bool = False,
+    use_road_refinement: bool = False,
+    use_tta: bool = False,
 ) -> dict[str, float]:
     """
     Validate model for multi-class segmentation with per-class IoU breakdown.
 
     Accumulates global intersection / union per class across all batches for
     accurate IoU computation, then prints a per-class breakdown table.
+    Classes with zero ground-truth pixels are excluded from macro mIoU.
 
     Args:
         model: Segmentation model with num_classes output channels.
@@ -199,6 +117,8 @@ def validate_multiclass(
         criterion: Multi-class loss function.
         device: Device to validate on.
         num_classes: Total number of classes including background.
+        use_multiscale: Enable multi-scale inference (1.0x + 0.75x).
+        use_road_refinement: Apply morphological refinement to Road class.
 
     Returns:
         Dictionary with val_loss, val_iou (macro foreground mIoU), val_dice,
@@ -212,6 +132,11 @@ def validate_multiclass(
     global_intersection = torch.zeros(num_classes, device=device, dtype=torch.float64)
     global_union = torch.zeros(num_classes, device=device, dtype=torch.float64)
     global_cardinality = torch.zeros(num_classes, device=device, dtype=torch.float64)
+    global_gt_pixels = torch.zeros(num_classes, device=device, dtype=torch.float64)
+
+    # Sanity-check accumulators for unique class tracking
+    all_unique_preds = set()
+    all_unique_gt = set()
 
     for images, masks in dataloader:
         images = images.to(device, non_blocking=True)
@@ -219,9 +144,57 @@ def validate_multiclass(
 
         with autocast(device_type="cuda"):
             logits = model(images)                    # (B, C, H, W)
+
+            # Multi-scale inference: average logits at 1.0x and 0.75x scales
+            if use_multiscale:
+                B, C, H, W = logits.shape
+                # Downsample input to 0.75x
+                images_small = F.interpolate(images, scale_factor=0.75, mode='bilinear', align_corners=False)
+                logits_small = model(images_small)
+                # Upsample logits back to original size
+                logits_small_up = F.interpolate(logits_small, size=(H, W), mode='bilinear', align_corners=False)
+                # Average logits
+                logits = (logits + logits_small_up) / 2.0
+
+            # Test-time augmentation: average with flipped predictions
+            if use_tta:
+                B, C, H, W = logits.shape
+                # Horizontal flip
+                logits_hflip = torch.flip(model(torch.flip(images, [3])), [3])
+                # Vertical flip
+                logits_vflip = torch.flip(model(torch.flip(images, [2])), [2])
+                logits = (logits + logits_hflip + logits_vflip) / 3.0
+
             loss = criterion(logits, masks)
 
         preds = logits.argmax(dim=1)                  # (B, H, W)
+        
+        # Morphological refinement for Road class (class 1)
+        if use_road_refinement:
+            B, H, W = preds.shape
+            for b in range(B):
+                pred_np = preds[b].cpu().numpy().astype(np.uint8)
+                road_mask = (pred_np == 1).astype(np.uint8)
+
+                # Apply morphological closing (5x5 kernel for better gap filling)
+                kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+                road_mask_refined = cv2.morphologyEx(road_mask, cv2.MORPH_CLOSE, kernel)
+
+                # Remove small connected components (< 200 pixels)
+                num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(road_mask_refined, connectivity=8)
+                for label_idx in range(1, num_labels):  # skip background (0)
+                    area = stats[label_idx, cv2.CC_STAT_AREA]
+                    if area < 200:
+                        road_mask_refined[labels == label_idx] = 0
+
+                # Merge refined road mask back into predictions
+                pred_np[road_mask == 1] = 0  # clear old road pixels
+                pred_np[road_mask_refined == 1] = 1  # set refined road pixels
+                preds[b] = torch.from_numpy(pred_np).to(device)
+
+        # Debug: track unique classes seen
+        all_unique_preds.update(torch.unique(preds).cpu().tolist())
+        all_unique_gt.update(torch.unique(masks).cpu().tolist())
 
         # Accumulate per-class intersection and union across batches
         for c in range(num_classes):
@@ -231,12 +204,17 @@ def validate_multiclass(
             global_intersection[c] += inter
             global_union[c] += p.sum() + t.sum() - inter
             global_cardinality[c] += p.sum() + t.sum()
+            global_gt_pixels[c] += t.sum()
 
         running_loss += loss.item()
         num_batches += 1
 
     n = max(num_batches, 1)
     smooth = 1e-6
+
+    # ── Sanity prints ────────────────────────────────────────────────────────
+    print(f"\n  Unique predicted classes: {sorted(all_unique_preds)}")
+    print(f"  Unique GT classes:       {sorted(all_unique_gt)}")
 
     # ── Per-class IoU and Dice from global accumulators ──────────────────────
     per_class_iou: dict[int, float] = {}
@@ -247,9 +225,18 @@ def validate_multiclass(
         per_class_iou[c] = iou_c.item()
         per_class_dice[c] = dice_c.item()
 
-    # Foreground-only macro average (classes 1 .. C-1)
-    fg_ious = [per_class_iou[c] for c in range(1, num_classes)]
-    fg_dices = [per_class_dice[c] for c in range(1, num_classes)]
+    # Foreground-only macro average — exclude classes with zero GT pixels
+    excluded_classes: list[str] = []
+    fg_ious: list[float] = []
+    fg_dices: list[float] = []
+    for c in range(1, num_classes):
+        gt_px = global_gt_pixels[c].item()
+        if gt_px < 1.0:
+            excluded_classes.append(CLASS_NAMES.get(c, f"Class {c}"))
+        else:
+            fg_ious.append(per_class_iou[c])
+            fg_dices.append(per_class_dice[c])
+
     macro_miou = sum(fg_ious) / len(fg_ious) if fg_ious else 0.0
     macro_mdice = sum(fg_dices) / len(fg_dices) if fg_dices else 0.0
 
@@ -257,7 +244,14 @@ def validate_multiclass(
     print("\n  Per-Class IoU Breakdown:")
     for c in range(1, num_classes):
         name = CLASS_NAMES.get(c, f"Class {c}")
-        print(f"    {name:14s}:  IoU={per_class_iou[c]:.4f}   Dice={per_class_dice[c]:.4f}")
+        gt_px = int(global_gt_pixels[c].item())
+        if gt_px == 0:
+            # IoU = (0+ε)/(0+ε) = 1.0 is numerically valid but semantically meaningless
+            print(f"    {name:14s}:  IoU=  N/A    Dice=  N/A    GT=0px  [absent in val]")
+        else:
+            print(f"    {name:14s}:  IoU={per_class_iou[c]:.4f}   Dice={per_class_dice[c]:.4f}   GT={gt_px:,}px")
+    if excluded_classes:
+        print(f"    Excluded from macro mIoU (no GT pixels): {excluded_classes}")
     print(f"    {'Macro FG':14s}:  mIoU={macro_miou:.4f}  mDice={macro_mdice:.4f}")
 
     return {
@@ -267,44 +261,3 @@ def validate_multiclass(
         "per_class_iou":  per_class_iou,
         "per_class_dice": per_class_dice,
     }
-
-
-def compute_multiclass_metrics(
-    preds: torch.Tensor,
-    targets: torch.Tensor,
-    num_classes: int = 5,
-    smooth: float = 1e-6,
-) -> tuple[float, float]:
-    """
-    Compute mean IoU and mean Dice over foreground classes (1..C-1).
-
-    Args:
-        preds:       (B, H, W) predicted class indices.
-        targets:     (B, H, W) ground truth class indices (long).
-        num_classes: Total classes including background.
-        smooth:      Smoothing to avoid division by zero.
-
-    Returns:
-        Tuple of (mean_iou, mean_dice) over foreground classes.
-    """
-    iou_list, dice_list = [], []
-
-    for c in range(1, num_classes):        # skip background class 0
-        p = (preds == c).float().flatten(1)
-        t = (targets == c).float().flatten(1)
-
-        intersection = (p * t).sum(dim=1)
-        union = p.sum(dim=1) + t.sum(dim=1) - intersection
-        cardinality = p.sum(dim=1) + t.sum(dim=1)
-
-        # Only average over samples where the class is present
-        iou_list.append(
-            ((intersection + smooth) / (union + smooth)).mean().item()
-        )
-        dice_list.append(
-            ((2.0 * intersection + smooth) / (cardinality + smooth)).mean().item()
-        )
-
-    mean_iou = sum(iou_list) / len(iou_list) if iou_list else 0.0
-    mean_dice = sum(dice_list) / len(dice_list) if dice_list else 0.0
-    return mean_iou, mean_dice

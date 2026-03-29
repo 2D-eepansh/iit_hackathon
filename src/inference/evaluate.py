@@ -1,34 +1,35 @@
-"""Evaluate model on test set."""
+"""Evaluate SVAMITVA model on validation data with per-class IoU."""
 
 import argparse
-from pathlib import Path
 
 import torch
 from torch.amp import autocast
 from torch.utils.data import DataLoader
 
-from src.datasets.building_dataset import BuildingDataset, get_val_transform
+from src.datasets.unified_dataset import (
+    UnifiedMultiClassDataset,
+    DEFAULT_SOURCES,
+    get_val_transform,
+)
 from src.models.model_factory import create_model
+from src.datasets.unified_dataset import CLASS_NAMES
 
 
-def load_model(checkpoint_path: str, device: torch.device) -> torch.nn.Module:
-    """Load trained model."""
-    checkpoint = torch.load(checkpoint_path, map_location=device)
-    
+def load_model(checkpoint_path: str, device: torch.device) -> tuple:
+    """Load trained model from checkpoint, return (model, config)."""
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     config = checkpoint.get("config", {})
     model = create_model(
-        architecture=config.get("architecture", "Unet"),
-        encoder_name=config.get("encoder_name", "efficientnet-b4"),
+        architecture=config.get("architecture", "DeepLabV3Plus"),
+        encoder_name=config.get("encoder_name", "resnet50"),
         encoder_weights=None,
         in_channels=3,
-        classes=1,
+        classes=config.get("classes", 4),
     )
-    
     model.load_state_dict(checkpoint["model_state_dict"])
     model = model.to(device)
     model.eval()
-    
-    return model
+    return model, config
 
 
 @torch.no_grad()
@@ -36,92 +37,74 @@ def evaluate(
     model: torch.nn.Module,
     dataloader: DataLoader,
     device: torch.device,
-    threshold: float = 0.5,
+    num_classes: int = 4,
 ) -> dict[str, float]:
-    """Evaluate on dataset."""
-    total_iou = 0.0
-    total_dice = 0.0
-    num_samples = 0
-    
-    print("Evaluating...")
+    """Evaluate model with global per-class IoU accumulation."""
+    total_intersection = torch.zeros(num_classes, device=device, dtype=torch.float64)
+    total_union = torch.zeros(num_classes, device=device, dtype=torch.float64)
+
     for images, masks in dataloader:
         images = images.to(device, non_blocking=True)
         masks = masks.to(device, non_blocking=True)
-        
-        # Predict
+
         with autocast(device_type="cuda"):
             logits = model(images)
-        
-        probs = torch.sigmoid(logits)
-        preds = (probs > threshold).float()
-        
-        # Compute metrics
-        preds_flat = preds.flatten(1)
-        masks_flat = masks.flatten(1)
-        
-        intersection = (preds_flat * masks_flat).sum(dim=1)
-        union = preds_flat.sum(dim=1) + masks_flat.sum(dim=1) - intersection
-        cardinality = preds_flat.sum(dim=1) + masks_flat.sum(dim=1)
-        
-        iou = ((intersection + 1e-6) / (union + 1e-6)).mean()
-        dice = ((2.0 * intersection + 1e-6) / (cardinality + 1e-6)).mean()
-        
-        total_iou += iou.item()
-        total_dice += dice.item()
-        num_samples += 1
-    
-    return {
-        "iou": total_iou / num_samples,
-        "dice": total_dice / num_samples,
-    }
+        preds = logits.argmax(dim=1)
+
+        for c in range(num_classes):
+            p = (preds == c).float()
+            t = (masks == c).float()
+            inter = (p * t).sum()
+            total_intersection[c] += inter
+            total_union[c] += p.sum() + t.sum() - inter
+
+    smooth = 1e-6
+    results: dict[str, float] = {}
+    fg_ious: list[float] = []
+    for c in range(1, num_classes):
+        iou = (total_intersection[c] + smooth) / (total_union[c] + smooth)
+        results[f"iou_class_{c}"] = iou.item()
+        if total_union[c].item() > 0:
+            fg_ious.append(iou.item())
+    results["mean_iou"] = sum(fg_ious) / len(fg_ious) if fg_ious else 0.0
+    return results
 
 
 def main() -> None:
-    """Main evaluation."""
-    parser = argparse.ArgumentParser(description="Evaluate model")
-    parser.add_argument(
-        "--checkpoint",
-        type=str,
-        default="outputs/checkpoints/best_model.pth",
-        help="Path to checkpoint",
-    )
-    parser.add_argument("--data-root", type=str, default="data/raw/AerialImageDataset", help="Data root")
-    parser.add_argument("--split", type=str, default="test", help="Data split (train/test)")
-    parser.add_argument("--batch-size", type=int, default=16, help="Batch size")
-    parser.add_argument("--threshold", type=float, default=0.5, help="Prediction threshold")
-    
+    parser = argparse.ArgumentParser(description="Evaluate SVAMITVA model")
+    parser.add_argument("--checkpoint", type=str, default="outputs/checkpoints/best_model.pth")
+    parser.add_argument("--batch-size", type=int, default=4)
     args = parser.parse_args()
-    
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    
     print(f"Loading model from {args.checkpoint}...")
-    model = load_model(args.checkpoint, device)
-    
-    print(f"Loading {args.split} dataset...")
-    dataset = BuildingDataset(
-        data_root=args.data_root,
-        split=args.split,
-        transform=get_val_transform(),
-        use_processed=True,
+    model, config = load_model(args.checkpoint, device)
+    num_classes = config.get("classes", 4)
+
+    print("Loading validation dataset...")
+    val_dataset = UnifiedMultiClassDataset(
+        sources=DEFAULT_SOURCES,
+        split="val",
+        transform=get_val_transform(config.get("image_size", 512)),
+        patch_size=config.get("image_size", 512),
     )
-    
     dataloader = DataLoader(
-        dataset,
-        batch_size=args.batch_size,
-        shuffle=False,
-        num_workers=4,
-        pin_memory=True,
+        val_dataset, batch_size=args.batch_size,
+        shuffle=False, num_workers=4, pin_memory=True,
     )
-    
-    print(f"Evaluating on {len(dataset)} samples...")
-    metrics = evaluate(model, dataloader, device, args.threshold)
-    
-    print("\n" + "=" * 80)
-    print(f"EVALUATION RESULTS ({args.split.upper()})")
-    print("=" * 80)
-    print(f"IoU:   {metrics['iou']:.4f}")
-    print(f"Dice:  {metrics['dice']:.4f}")
-    print("=" * 80)
+
+    print(f"Evaluating on {len(val_dataset)} patches...")
+    metrics = evaluate(model, dataloader, device, num_classes)
+
+    print("\n" + "=" * 60)
+    print("EVALUATION RESULTS")
+    print("=" * 60)
+    for c in range(1, num_classes):
+        name = CLASS_NAMES.get(c, f"Class {c}")
+        iou = metrics.get(f"iou_class_{c}", 0.0)
+        print(f"  {name:14s}:  IoU={iou:.4f}")
+    print(f"  {'Mean FG IoU':14s}:  {metrics['mean_iou']:.4f}")
+    print("=" * 60)
 
 
 if __name__ == "__main__":

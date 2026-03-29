@@ -61,11 +61,11 @@ def export_onnx(
     
     # Create model
     model = create_model(
-        architecture=config.get("architecture", "Unet"),
-        encoder_name=config.get("encoder_name", "efficientnet-b4"),
+        architecture=config.get("architecture", "DeepLabV3Plus"),
+        encoder_name=config.get("encoder_name", "resnet50"),
         encoder_weights=None,
         in_channels=3,
-        classes=1,
+        classes=config.get("classes", 4),
     )
     
     model.load_state_dict(checkpoint["model_state_dict"])
