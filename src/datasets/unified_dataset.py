@@ -50,7 +50,7 @@ def get_train_transform(image_size: int = 512) -> A.Compose:
                 translate_percent={"x": (-0.0625, 0.0625), "y": (-0.0625, 0.0625)},
                 scale=(0.9, 1.1),
                 rotate=(-45, 45),
-                mode=cv2.BORDER_CONSTANT,
+                border_mode=cv2.BORDER_CONSTANT,
                 p=0.5,
             ),
             A.OneOf(
