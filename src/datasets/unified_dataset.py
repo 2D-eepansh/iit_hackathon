@@ -18,10 +18,12 @@ from pathlib import Path
 from typing import Optional
 
 import albumentations as A
+import cv2
 import geopandas as gpd
 import numpy as np
 import rasterio
 import torch
+from albumentations.pytorch import ToTensorV2
 from rasterio.features import rasterize
 from rasterio.windows import (
     Window,
@@ -30,8 +32,63 @@ from rasterio.windows import (
 )
 from torch.utils.data import Dataset
 
-# Re-export transforms so callers can keep one import path
-from src.datasets.multiclass_dataset import get_train_transform, get_val_transform
+
+# ── ImageNet normalization constants ─────────────────────────────────────────
+IMAGENET_MEAN = [0.485, 0.456, 0.406]
+IMAGENET_STD = [0.229, 0.224, 0.225]
+
+
+def get_train_transform(image_size: int = 512) -> A.Compose:
+    """Get training augmentation pipeline."""
+    return A.Compose(
+        [
+            A.Resize(image_size, image_size, interpolation=cv2.INTER_LINEAR),
+            A.HorizontalFlip(p=0.5),
+            A.VerticalFlip(p=0.5),
+            A.RandomRotate90(p=0.5),
+            A.Affine(
+                translate_percent={"x": (-0.0625, 0.0625), "y": (-0.0625, 0.0625)},
+                scale=(0.9, 1.1),
+                rotate=(-45, 45),
+                mode=cv2.BORDER_CONSTANT,
+                p=0.5,
+            ),
+            A.OneOf(
+                [
+                    A.GaussNoise(p=1.0),
+                    A.GaussianBlur(blur_limit=(3, 5), p=1.0),
+                ],
+                p=0.2,
+            ),
+            A.OneOf(
+                [
+                    A.RandomBrightnessContrast(
+                        brightness_limit=0.2, contrast_limit=0.2, p=1.0
+                    ),
+                    A.HueSaturationValue(
+                        hue_shift_limit=10,
+                        sat_shift_limit=20,
+                        val_shift_limit=10,
+                        p=1.0,
+                    ),
+                ],
+                p=0.3,
+            ),
+            A.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
+            ToTensorV2(),
+        ]
+    )
+
+
+def get_val_transform(image_size: int = 512) -> A.Compose:
+    """Get validation transform pipeline."""
+    return A.Compose(
+        [
+            A.Resize(image_size, image_size, interpolation=cv2.INTER_LINEAR),
+            A.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
+            ToTensorV2(),
+        ]
+    )
 
 
 # ── Per-source configuration ────────────────────────────────────────────────
@@ -240,6 +297,16 @@ class UnifiedMultiClassDataset(Dataset):
         # ── 5. Precompute centroids for minority-aware sampling ───────────────
         self._precompute_feature_centroids()
 
+        # ── 6. Build deterministic val grid (full TIFF coverage) ──────────────
+        self._val_grid: list[tuple[int, int, int]] = []
+        if split == "val":
+            self._generate_val_grid()
+
+        # ── 7. Pre-cache bridge patches for copy-paste augmentation ───────────
+        self._bridge_patches: list[tuple[np.ndarray, np.ndarray]] = []
+        if split == "train":
+            self._cache_bridge_patches(max_patches=30)
+
     # ── SHP loading (per-TIFF CRS) ──────────────────────────────────────────
 
     @staticmethod
@@ -304,24 +371,155 @@ class UnifiedMultiClassDataset(Dataset):
         total = sum(len(v) for v in self._centroids.values())
         print(f"✓ Pre-indexed {total} feature centroids across {len(self.entries)} TIFFs")
 
+    # ── Deterministic validation grid ────────────────────────────────────────
+
+    def _generate_val_grid(self) -> None:
+        """Build a non-overlapping grid of patches covering every val TIFF.
+
+        Each grid cell is a ``(tiff_idx, y, x)`` tuple.  Edge patches are
+        clamped so the patch never exceeds the raster boundary.  The grid
+        is deterministic and identical across epochs.
+        """
+        ps = self.patch_size
+        grid: list[tuple[int, int, int]] = []
+
+        for tiff_idx, entry in enumerate(self.entries):
+            h, w = entry.height, entry.width
+            rows = list(range(0, h - ps + 1, ps))
+            cols = list(range(0, w - ps + 1, ps))
+            # Clamp last row/col if raster not evenly divisible
+            if rows and rows[-1] + ps < h:
+                rows.append(h - ps)
+            if cols and cols[-1] + ps < w:
+                cols.append(w - ps)
+            if not rows:
+                rows = [max(0, h - ps)]
+            if not cols:
+                cols = [max(0, w - ps)]
+            for y in rows:
+                for x in cols:
+                    grid.append((tiff_idx, y, x))
+
+        # Subsample if grid is very large (cap validation cost)
+        max_val_patches = 500
+        if len(grid) > max_val_patches:
+            rng = np.random.RandomState(seed=42)
+            indices = rng.choice(len(grid), size=max_val_patches, replace=False)
+            indices.sort()
+            grid = [grid[i] for i in indices]
+
+        self._val_grid = grid
+        print(f"✓ Val grid: {len(self._val_grid)} deterministic patches "
+              f"across {len(self.entries)} TIFFs (patch={ps})")
+
+    # ── Bridge copy-paste augmentation ────────────────────────────────────────
+
+    def _cache_bridge_patches(self, max_patches: int = 30) -> None:
+        """Pre-cache small bridge crops from TIFFs that contain bridge features.
+
+        For each bridge centroid, reads a 256×256 crop and stores the
+        image + mask pair.  These are later pasted onto training patches
+        to give the model more bridge exposure.
+        """
+        bridge_class = 2
+        crop_size = 256
+        cached = 0
+
+        for tiff_idx, entry in enumerate(self.entries):
+            if bridge_class not in entry.layers:
+                continue
+            centroids_for_bridge = [
+                (r, c) for cid, r, c in self._centroids.get(tiff_idx, [])
+                if cid == bridge_class
+            ]
+            if not centroids_for_bridge:
+                continue
+
+            try:
+                with rasterio.open(str(entry.path)) as src:
+                    h, w = src.height, src.width
+                    for cy, cx in centroids_for_bridge:
+                        if cached >= max_patches:
+                            break
+                        y = max(0, min(cy - crop_size // 2, h - crop_size))
+                        x = max(0, min(cx - crop_size // 2, w - crop_size))
+                        if y < 0 or x < 0:
+                            continue
+                        win = Window(x, y, crop_size, crop_size)
+                        img = src.read([1, 2, 3], window=win).transpose(1, 2, 0).astype(np.uint8)
+                        msk = self._rasterize_patch(win, src.transform, entry.layers, crop_size)
+                        # Only keep if patch actually has bridge pixels
+                        if (msk == bridge_class).sum() > 50:
+                            self._bridge_patches.append((img, msk))
+                            cached += 1
+            except Exception as exc:
+                print(f"⚠️  Bridge cache error for {entry.path.name}: {exc}")
+
+        if self._bridge_patches:
+            print(f"✓ Cached {len(self._bridge_patches)} bridge patches for copy-paste augmentation")
+        else:
+            print("⚠️  No bridge patches cached (bridge features too sparse)")
+
+    def _apply_bridge_copypaste(
+        self, image: np.ndarray, mask: np.ndarray, prob: float = 0.3
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """With probability `prob`, paste a random bridge crop onto the patch."""
+        if not self._bridge_patches or np.random.rand() > prob:
+            return image, mask
+
+        bridge_img, bridge_msk = self._bridge_patches[
+            np.random.randint(len(self._bridge_patches))
+        ]
+
+        ph, pw = image.shape[:2]
+        bh, bw = bridge_img.shape[:2]
+        if bh > ph or bw > pw:
+            return image, mask
+
+        # Random paste location
+        y = np.random.randint(0, ph - bh + 1)
+        x = np.random.randint(0, pw - bw + 1)
+
+        # Only paste where bridge pixels exist (class 2)
+        bridge_mask_bool = bridge_msk == 2
+        if bridge_mask_bool.sum() == 0:
+            return image, mask
+
+        image[y:y+bh, x:x+bw][bridge_mask_bool] = bridge_img[bridge_mask_bool]
+        mask[y:y+bh, x:x+bw][bridge_mask_bool] = 2
+
+        return image, mask
+
     # ── Dataset interface ────────────────────────────────────────────────────
 
     def __len__(self) -> int:
+        if self._val_grid:
+            return len(self._val_grid)
         return len(self.entries) * self.patches_per_image
 
     def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
-        tiff_idx = idx % len(self.entries)
+        if self._val_grid:
+            tiff_idx, grid_y, grid_x = self._val_grid[idx]
+        else:
+            tiff_idx = idx % len(self.entries)
+            grid_y = grid_x = None
         entry = self.entries[tiff_idx]
 
         with rasterio.open(str(entry.path)) as src:
             height, width = src.height, src.width
 
-            if self.split == "train":
+            if self._val_grid:
+                image, mask = self._sample_grid_patch(src, entry, grid_y, grid_x)
+            elif self.split == "train":
                 image, mask = self._sample_train_patch(
                     src, entry, tiff_idx, height, width
                 )
             else:
                 image, mask = self._sample_val_patch(src, entry, height, width, idx)
+
+        # Bridge copy-paste (train only, before augmentation)
+        if self.split == "train" and self._bridge_patches:
+            image, mask = self._apply_bridge_copypaste(image, mask)
 
         # Augmentation
         if self.transform is not None:
@@ -396,6 +594,16 @@ class UnifiedMultiClassDataset(Dataset):
         mask = self._rasterize_patch(win, src.transform, entry.layers)
         return image, mask
 
+    def _sample_grid_patch(
+        self, src, entry: _TiffEntry, y: int, x: int
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Read a patch at a fixed grid position (deterministic val)."""
+        ps = self.patch_size
+        win = Window(x, y, ps, ps)
+        image = src.read([1, 2, 3], window=win).transpose(1, 2, 0).astype(np.uint8)
+        mask = self._rasterize_patch(win, src.transform, entry.layers)
+        return image, mask
+
     # ── Rasterization (shared, identical to original) ────────────────────────
 
     @staticmethod
@@ -405,12 +613,19 @@ class UnifiedMultiClassDataset(Dataset):
         layers: dict[int, gpd.GeoDataFrame],
         patch_size: int | None = None,
     ) -> np.ndarray:
-        """Rasterize SHP layers for a window patch."""
+        """Rasterize SHP layers for a window patch.
+
+        Rasterization order: Built-Up (3) → Bridge (2) → Road (1).
+        Later classes overwrite earlier ones, so Road takes priority at
+        overlap (roads passing through built-up areas remain labelled Road).
+        """
         ps = patch_size or window.width
         mask = np.zeros((ps, ps), dtype=np.uint8)
         ptf = window_transform(window, raster_transform)
 
-        for class_id, gdf in layers.items():
+        # Rasterize highest class ID first, lowest last → Road wins at overlap
+        for class_id in sorted(layers.keys(), reverse=True):
+            gdf = layers[class_id]
             if len(gdf) == 0:
                 continue
             try:
@@ -426,7 +641,8 @@ class UnifiedMultiClassDataset(Dataset):
                     fill=0,
                     dtype=np.uint8,
                 )
-                mask = np.maximum(mask, rasterized)
+                # Direct assignment: later (lower) class IDs overwrite earlier (higher)
+                mask[rasterized > 0] = rasterized[rasterized > 0]
             except Exception as e:
                 print(f"Warning: rasterize error class {class_id}: {e}")
         return mask

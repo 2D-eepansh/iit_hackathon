@@ -1,7 +1,6 @@
 """Evaluate SVAMITVA model on validation data with per-class IoU."""
 
 import argparse
-from pathlib import Path
 
 import torch
 from torch.amp import autocast
@@ -13,14 +12,7 @@ from src.datasets.unified_dataset import (
     get_val_transform,
 )
 from src.models.model_factory import create_model
-
-
-CLASS_NAMES = {
-    0: "Background",
-    1: "Road",
-    2: "Bridge",
-    3: "Built-Up Area",
-}
+from src.datasets.unified_dataset import CLASS_NAMES
 
 
 def load_model(checkpoint_path: str, device: torch.device) -> tuple:
@@ -28,8 +20,8 @@ def load_model(checkpoint_path: str, device: torch.device) -> tuple:
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     config = checkpoint.get("config", {})
     model = create_model(
-        architecture=config.get("architecture", "Unet"),
-        encoder_name=config.get("encoder_name", "efficientnet-b4"),
+        architecture=config.get("architecture", "DeepLabV3Plus"),
+        encoder_name=config.get("encoder_name", "resnet50"),
         encoder_weights=None,
         in_channels=3,
         classes=config.get("classes", 4),
