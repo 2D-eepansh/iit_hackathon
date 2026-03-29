@@ -109,11 +109,11 @@ class EMA:
 
     @torch.no_grad()
     def update(self, model: torch.nn.Module) -> None:
-        for name, param in model.state_dict().items():
-            if self.shadow[name].is_floating_point():
-                self.shadow[name].mul_(self.decay).add_(param, alpha=1.0 - self.decay)
-            else:
-                self.shadow[name].copy_(param)  # integer buffers (e.g. num_batches_tracked)
+        # Use named_parameters/buffers to avoid state_dict() copy overhead on every step
+        for name, param in model.named_parameters():
+            self.shadow[name].mul_(self.decay).add_(param.data, alpha=1.0 - self.decay)
+        for name, buf in model.named_buffers():
+            self.shadow[name].copy_(buf)
 
     def apply_shadow(self, model: torch.nn.Module) -> None:
         """Swap model weights with EMA weights (for validation)."""
