@@ -73,7 +73,7 @@ CONFIG = {
     "dice_weight": 0.4,
 
     # EMA
-    "ema_decay": 0.999,
+    "ema_decay": 0.99,      # ~100 steps window (~2.6 epochs) — meaningful by epoch 5
 
     # Scheduler
     "scheduler_type": "plateau",
