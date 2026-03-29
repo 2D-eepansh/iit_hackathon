@@ -345,7 +345,7 @@ def main() -> None:
         print(f"Epoch {epoch}/{config['num_epochs']}")
         print(f"{'─' * 80}")
 
-        # Train
+        # Train (EMA updated per-step inside train_one_epoch)
         train_metrics = train_one_epoch(
             model=model,
             dataloader=train_loader,
@@ -355,10 +355,8 @@ def main() -> None:
             device=device,
             max_grad_norm=config["max_grad_norm"],
             accumulation_steps=config["accumulation_steps"],
+            ema=ema,
         )
-
-        # Update EMA after each training epoch
-        ema.update(model)
 
         # Validate using EMA weights (smoother, more stable)
         ema.apply_shadow(model)

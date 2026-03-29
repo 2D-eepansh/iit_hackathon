@@ -21,6 +21,7 @@ def train_one_epoch(
     device: torch.device,
     max_grad_norm: float = 1.0,
     accumulation_steps: int = 1,
+    ema=None,
 ) -> dict[str, float]:
     """
     Train model for one epoch with optimized settings.
@@ -63,6 +64,8 @@ def train_one_epoch(
             scaler.step(optimizer)
             scaler.update()
             optimizer.zero_grad(set_to_none=True)
+            if ema is not None:
+                ema.update(model)  # per-step EMA update (decay=0.999 meaningful at this granularity)
         
         running_loss += loss.item() * accumulation_steps
     
@@ -73,6 +76,8 @@ def train_one_epoch(
         scaler.step(optimizer)
         scaler.update()
         optimizer.zero_grad(set_to_none=True)
+        if ema is not None:
+            ema.update(model)
     
     epoch_time = time.time() - start_time
     mean_loss = running_loss / len(dataloader)
