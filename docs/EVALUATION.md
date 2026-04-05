@@ -43,7 +43,7 @@ Generates plots in `outputs/plots/`:
 python src/inference/evaluate.py --checkpoint outputs/checkpoints/best_model.pth
 ```
 
-Lightweight evaluation with TTA and multi-scale options.
+Lightweight CLI evaluation with per-class IoU reporting.
 
 ## Inference on Test TIFFs
 
@@ -78,8 +78,8 @@ Exports:
 
 | Metric | Description |
 |--------|-------------|
-| **mIoU** | Mean Intersection over Union across all 4 classes |
-| **mDice** | Mean Dice coefficient across all 4 classes |
+| **mIoU** | Mean Intersection over Union across foreground classes (excludes background) |
+| **mDice** | Mean Dice coefficient across foreground classes (excludes background) |
 | **Per-class IoU** | IoU for each individual class |
 | **Pixel Accuracy** | Fraction of correctly classified pixels |
 | **Infrastructure Accuracy** | Accuracy considering only non-background pixels |

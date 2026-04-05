@@ -10,9 +10,9 @@ from src.datasets.unified_dataset import (
     UnifiedMultiClassDataset,
     DEFAULT_SOURCES,
     get_val_transform,
+    CLASS_NAMES,
 )
 from src.models.model_factory import create_model
-from src.datasets.unified_dataset import CLASS_NAMES
 
 
 def load_model(checkpoint_path: str, device: torch.device) -> tuple:

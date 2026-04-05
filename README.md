@@ -17,6 +17,8 @@ We train a multi-class segmentation model on georeferenced drone orthomosaics wi
 
 ## Performance
 
+### Segmentation Metrics (Best Checkpoint — Epoch 39/80)
+
 | Metric | Value |
 |--------|-------|
 | Best Validation mIoU (EMA + TTA + Multiscale) | **0.5880** |
@@ -24,7 +26,25 @@ We train a multi-class segmentation model on georeferenced drone orthomosaics wi
 | Road IoU | 0.531 |
 | Built-Up IoU | 0.645 |
 
-> Results are from the best checkpoint at epoch 39/80. TTA (test-time augmentation) and multi-scale inference provide a +0.036 mIoU gain over single-scale evaluation.
+> TTA (test-time augmentation) and multi-scale inference provide a +0.036 mIoU gain over single-scale evaluation.
+
+### Evaluation Statistics (Best EMA Checkpoint)
+
+| Class | Precision | Recall | F1 Score |
+|-------|-----------|--------|----------|
+| **Road** | 53.1% | 83.5% | **0.649** |
+| **Built-Up Area** | 64.7% | 96.7% | **0.775** |
+| **Bridge** | N/A | N/A | N/A* |
+
+\* Bridge has 0 ground-truth pixels in the validation set — evaluation not possible.
+
+| Summary Metric | Value |
+|----------------|-------|
+| **Mean Infrastructure F1** | **0.712** |
+| Infrastructure Detection Accuracy | 94.4% |
+| Validation Pixels Evaluated | ~295M |
+
+> Evaluated on 500 deterministic validation patches from 2 held-out TIFFs. Run `python evaluate_model_statistics.py` to reproduce.
 
 ## Model Architecture
 
@@ -158,7 +178,7 @@ python src/inference/export_model.py --checkpoint outputs/checkpoints/best_model
 
 ## Training Details
 
-- **Augmentations**: Horizontal/vertical flip, random rotate 90, affine (rotation +/-45 deg, scale 0.85-1.15), color jitter, Gaussian blur, CLAHE
+- **Augmentations**: Horizontal/vertical flip, random rotate 90, affine (rotation +/-45 deg, scale 0.9-1.1), Gaussian noise/blur, brightness/contrast jitter
 - **Positive sampling**: 90% of train patches are centered on feature centroids (roads, bridges, built-up)
 - **Bridge handling**: Copy-paste augmentation with 30 cached bridge patches (bridge has ~0 pixels in val set)
 - **EMA strategy**: Shadow weights updated per optimizer step; actual model used for validation (clean LR scheduler signal); EMA weights saved as best checkpoint

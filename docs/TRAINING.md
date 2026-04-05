@@ -56,12 +56,11 @@ Training augmentations (via Albumentations):
 2. Horizontal flip (p=0.5)
 3. Vertical flip (p=0.5)
 4. Random rotate 90 (p=0.5)
-5. Affine: rotation +/-45 deg, scale 0.85-1.15, translate +/-6.25%
-6. Color jitter: brightness/contrast +/-0.2, saturation/hue +/-0.1
-7. Gaussian blur (kernel 3-5, p=0.1)
-8. CLAHE (p=0.2)
-9. ImageNet normalization
-10. Bridge copy-paste (30 cached patches, applied to train patches)
+5. Affine: rotation +/-45 deg, scale 0.9-1.1, translate +/-6.25% (p=0.5)
+6. Gaussian noise or Gaussian blur (p=0.2)
+7. Brightness/contrast or hue/saturation jitter (p=0.3)
+8. ImageNet normalization
+9. Bridge copy-paste (30 cached patches, applied to train patches with p=0.3)
 
 ## Checkpoints
 

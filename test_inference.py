@@ -20,7 +20,7 @@ import torch
 import torch.nn.functional as F
 
 import rasterio
-from rasterio.windows import Window, transform as window_transform
+from rasterio.windows import Window
 
 import matplotlib
 matplotlib.use("Agg")

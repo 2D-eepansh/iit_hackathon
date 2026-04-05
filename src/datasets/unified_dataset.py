@@ -515,7 +515,7 @@ class UnifiedMultiClassDataset(Dataset):
                     src, entry, tiff_idx, height, width
                 )
             else:
-                image, mask = self._sample_val_patch(src, entry, height, width, idx)
+                raise RuntimeError("Val split requires a non-empty _val_grid")
 
         # Bridge copy-paste (train only, before augmentation)
         if self.split == "train" and self._bridge_patches:
@@ -576,24 +576,6 @@ class UnifiedMultiClassDataset(Dataset):
             raise RuntimeError(f"Failed to sample patch from {entry.path.name}")
         return image, mask
 
-    def _sample_val_patch(
-        self, src, entry: _TiffEntry, height: int, width: int, idx: int
-    ) -> tuple[np.ndarray, np.ndarray]:
-        """Deterministic random patch for validation (seeded by sample index).
-
-        Each ``idx`` maps to a unique, reproducible random position so that
-        validation patches cover the full TIFF extent rather than only the
-        centre crop.
-        """
-        ps = self.patch_size
-        rng = np.random.RandomState(seed=idx)
-        y = rng.randint(0, height - ps + 1)
-        x = rng.randint(0, width - ps + 1)
-        win = Window(x, y, ps, ps)
-        image = src.read([1, 2, 3], window=win).transpose(1, 2, 0).astype(np.uint8)
-        mask = self._rasterize_patch(win, src.transform, entry.layers)
-        return image, mask
-
     def _sample_grid_patch(
         self, src, entry: _TiffEntry, y: int, x: int
     ) -> tuple[np.ndarray, np.ndarray]:
@@ -646,8 +628,3 @@ class UnifiedMultiClassDataset(Dataset):
             except Exception as e:
                 print(f"Warning: rasterize error class {class_id}: {e}")
         return mask
-
-    # ── Utility ──────────────────────────────────────────────────────────────
-
-    def get_tiff_stem(self, idx: int) -> str:
-        return self.entries[idx % len(self.entries)].path.stem

@@ -134,10 +134,6 @@ def validate_multiclass(
     global_cardinality = torch.zeros(num_classes, device=device, dtype=torch.float64)
     global_gt_pixels = torch.zeros(num_classes, device=device, dtype=torch.float64)
 
-    # Sanity-check accumulators for unique class tracking
-    all_unique_preds = set()
-    all_unique_gt = set()
-
     for images, masks in dataloader:
         images = images.to(device, non_blocking=True)
         masks = masks.to(device, non_blocking=True)   # (B, H, W) long
@@ -192,10 +188,6 @@ def validate_multiclass(
                 pred_np[road_mask_refined == 1] = 1  # set refined road pixels
                 preds[b] = torch.from_numpy(pred_np).to(device)
 
-        # Debug: track unique classes seen
-        all_unique_preds.update(torch.unique(preds).cpu().tolist())
-        all_unique_gt.update(torch.unique(masks).cpu().tolist())
-
         # Accumulate per-class intersection and union across batches
         for c in range(num_classes):
             p = (preds == c).float()
@@ -211,10 +203,6 @@ def validate_multiclass(
 
     n = max(num_batches, 1)
     smooth = 1e-6
-
-    # ── Sanity prints ────────────────────────────────────────────────────────
-    print(f"\n  Unique predicted classes: {sorted(all_unique_preds)}")
-    print(f"  Unique GT classes:       {sorted(all_unique_gt)}")
 
     # ── Per-class IoU and Dice from global accumulators ──────────────────────
     per_class_iou: dict[int, float] = {}
