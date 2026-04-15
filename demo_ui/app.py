@@ -2,8 +2,8 @@
 app.py — Demo UI for SVAMITVA AI Infrastructure Mapping System.
 
 Launch:
-    cd /home/dk/ml_projects/iit_hackathon
-    venv/bin/streamlit run demo_ui/app.py
+    cd <project_root>
+    streamlit run demo_ui/app.py
 
 This is a VISUALIZATION INTERFACE for AI model outputs — demo purposes only.
 Remove /demo_ui to cleanly detach from the core system.
@@ -27,9 +27,13 @@ sys.path.insert(0, str(DEMO_DIR))
 from inference_wrapper import (  # noqa: E402
     CLASS_NAMES,
     CLASS_COLORS,
-    colorize_mask,
+    ROOFTOP_COLOR,
+    classify_rooftops,
+    colorize_confidence,
+    colorize_with_rooftops,
     create_overlay,
     get_class_stats,
+    get_infrastructure_summary,
     model_info,
     predict_image,
 )
@@ -284,6 +288,11 @@ st.markdown(f"""
   <span class="meta-chip">Epoch <span>{info['epoch']}</span></span>
   <span class="meta-chip">Best mIoU <span>{info['best_miou']:.4f}</span></span>
   <span class="meta-chip">Device <span>{info['device'].upper()}</span></span>
+  <span class="meta-chip">Ensemble <span>{'ON (ep43+ep80)' if info.get('ensemble') else 'OFF'}</span></span>
+  <span class="meta-chip">Bias Tuned <span>{'YES' if info.get('bias_tuned') else 'DEFAULT'}</span></span>
+</div>
+<div style="margin-top:0.6rem; font-size:0.78rem; color:#8b949e;">
+  Pipeline: {info.get('pipeline', 'Standard')}
 </div>
 </div>
 """, unsafe_allow_html=True)
@@ -324,9 +333,11 @@ if uploaded is not None:
     st.markdown("</div>", unsafe_allow_html=True)
 
     # Run inference
-    run_col, _ = st.columns([1, 2])
+    run_col, opt_col, _ = st.columns([1, 1, 1])
     with run_col:
-        run = st.button("⚡  Run Inference", use_container_width=True)
+        run = st.button("Run Inference", use_container_width=True)
+    with opt_col:
+        use_tta = st.toggle("TTA (3x slower, +IoU)", value=True)
 
     # ── Session state ─────────────────────────────────────────────────────────
     if "result" not in st.session_state:
@@ -340,45 +351,68 @@ if uploaded is not None:
         st.session_state.last_file = uploaded.name
 
     if run:
-        with st.spinner("Running segmentation inference…"):
-            t0      = time.time()
-            mask    = predict_image(image_rgb)
-            elapsed = time.time() - t0
+        with st.spinner("Running calibrated ensemble inference…"):
+            t0           = time.time()
+            mask, conf_map = predict_image(image_rgb, use_tta=use_tta, return_confidence=True)
+            rooftop_mask = classify_rooftops(mask)
+            elapsed      = time.time() - t0
 
         st.session_state.result = {
-            "mask":    mask,
-            "elapsed": elapsed,
+            "mask":         mask,
+            "rooftop_mask": rooftop_mask,
+            "conf_map":     conf_map,
+            "elapsed":      elapsed,
         }
 
     # ── Display results ───────────────────────────────────────────────────────
     if st.session_state.result is not None:
-        mask    = st.session_state.result["mask"]
-        elapsed = st.session_state.result["elapsed"]
-        stats   = get_class_stats(mask)
+        mask         = st.session_state.result["mask"]
+        rooftop_mask = st.session_state.result.get("rooftop_mask")
+        conf_map     = st.session_state.result.get("conf_map")
+        elapsed      = st.session_state.result["elapsed"]
+        stats        = get_class_stats(mask, rooftop_mask)
 
-        colored  = colorize_mask(mask)
-        overlay  = _to_display(create_overlay(image_rgb, mask))
+        colored  = colorize_with_rooftops(mask, rooftop_mask)
+        overlay  = _to_display(create_overlay(image_rgb, mask, rooftop_mask=rooftop_mask))
 
         # ── Output panels ────────────────────────────────────────────────────
         st.markdown('<div class="card" style="animation-delay:.2s"><div class="card-title">Segmentation Output</div>', unsafe_allow_html=True)
 
-        # Toggle for overlay
-        show_overlay = st.toggle("Show overlay blend", value=True)
+        col_opts1, col_opts2 = st.columns(2)
+        with col_opts1:
+            show_overlay = st.toggle("Show overlay blend", value=True)
+        with col_opts2:
+            show_conf = st.toggle("Show confidence map", value=False)
 
-        c1, c2, c3 = st.columns(3) if show_overlay else st.columns(2)
+        n_panels = 2 + int(show_overlay) + int(show_conf and conf_map is not None)
+        cols_out = st.columns(n_panels)
 
-        with c1:
+        panel_idx = 0
+        with cols_out[panel_idx]:
             st.image(image_rgb, use_container_width=True)
             st.markdown('<p class="img-caption">Original Image</p>', unsafe_allow_html=True)
+        panel_idx += 1
 
-        with c2:
+        with cols_out[panel_idx]:
             st.image(colored, use_container_width=True)
             st.markdown('<p class="img-caption">Predicted Mask</p>', unsafe_allow_html=True)
+        panel_idx += 1
 
         if show_overlay:
-            with c3:
+            with cols_out[panel_idx]:
                 st.image(overlay, use_container_width=True)
-                st.markdown('<p class="img-caption">Overlay (α = 0.45)</p>', unsafe_allow_html=True)
+                st.markdown('<p class="img-caption">Overlay (a=0.45)</p>', unsafe_allow_html=True)
+            panel_idx += 1
+
+        if show_conf and conf_map is not None:
+            conf_rgb = colorize_confidence(conf_map)
+            high_conf_pct = float((conf_map > 0.7).mean() * 100)
+            with cols_out[panel_idx]:
+                st.image(conf_rgb, use_container_width=True)
+                st.markdown(
+                    f'<p class="img-caption">Confidence ({high_conf_pct:.0f}% high)</p>',
+                    unsafe_allow_html=True
+                )
 
         st.markdown("</div>", unsafe_allow_html=True)
 
@@ -420,15 +454,68 @@ if uploaded is not None:
             st.markdown(legend_html, unsafe_allow_html=True)
             st.markdown("</div>", unsafe_allow_html=True)
 
-        # ── Timing + download ─────────────────────────────────────────────────
+        # ── Village Survey Statistics ─────────────────────────────────────────
+        infra = get_infrastructure_summary(mask, rooftop_mask if rooftop_mask is not None
+                                           else np.zeros_like(mask, dtype=bool))
+        n_classes_detected = sum(1 for s in stats.values() if s["pct"] > 0.1)
+
+        # Physical unit estimate (assuming 0.3m/px for demo images)
+        PIXEL_SIZE_M = 0.3
+        px_area = PIXEL_SIZE_M * PIXEL_SIZE_M
+        road_px     = int((mask == 1).sum())
+        water_px    = int((mask == 4).sum())
+        bu_px       = int((mask == 3).sum())
+        bridge_px   = int((mask == 2).sum())
+        total_area_ha = round(mask.size * px_area / 10000.0, 2)
+        road_len_m    = round(road_px * PIXEL_SIZE_M, 0)
+        water_area_m2 = round(water_px * px_area, 0)
+        bu_area_m2    = round(bu_px * px_area, 0)
+        conf_pct = round(float((conf_map > 0.7).mean() * 100), 1) if conf_map is not None else 0.0
+        review_pct = round(100.0 - conf_pct, 1)
+
         st.markdown(f"""
         <div class="card" style="animation-delay:.35s">
-        <div class="card-title">Inference Summary</div>
-        <span class="meta-chip">Inference time <span>{elapsed:.2f}s</span></span>
-        <span class="meta-chip">Image size <span>{w_orig}×{h_orig}px</span></span>
-        <span class="meta-chip">Classes detected
-          <span>{sum(1 for s in stats.values() if s['pct'] > 0.1)}</span>
-        </span>
+        <div class="card-title">Village Infrastructure Assessment</div>
+
+        <div style="display:flex; flex-wrap:wrap; gap:0.5rem; margin-bottom:1rem;">
+          <span class="meta-chip">Inference time <span>{elapsed:.2f}s</span></span>
+          <span class="meta-chip">Total area <span>~{total_area_ha} ha</span></span>
+          <span class="meta-chip">Classes detected <span>{n_classes_detected}</span></span>
+          <span class="meta-chip">Automated coverage <span>{conf_pct:.0f}%</span></span>
+          <span class="meta-chip">Needs review <span>{review_pct:.0f}%</span></span>
+        </div>
+
+        <div style="display:grid; grid-template-columns:repeat(2,1fr); gap:0.8rem;">
+
+          <div style="background:#0d1117;border:1px solid #30363d;border-radius:8px;padding:0.9rem;">
+            <div style="color:#ff5555;font-size:0.75rem;font-weight:700;letter-spacing:.08em;margin-bottom:.4rem;">ROAD NETWORK</div>
+            <div style="font-size:1.3rem;font-weight:800;color:#e6edf3;">~{road_len_m:,.0f} m</div>
+            <div style="font-size:0.8rem;color:#8b949e;margin-top:.2rem;">approx road length</div>
+            <div style="font-size:0.82rem;color:#c9d1d9;margin-top:.3rem;">{infra['road_pct']:.1f}% area coverage</div>
+          </div>
+
+          <div style="background:#0d1117;border:1px solid #30363d;border-radius:8px;padding:0.9rem;">
+            <div style="color:#ffff00;font-size:0.75rem;font-weight:700;letter-spacing:.08em;margin-bottom:.4rem;">BUILT-UP AREA</div>
+            <div style="font-size:1.3rem;font-weight:800;color:#e6edf3;">{infra['n_buildings']} bldgs</div>
+            <div style="font-size:0.8rem;color:#8b949e;margin-top:.2rem;">~{bu_area_m2:,.0f} m2 total</div>
+            <div style="font-size:0.82rem;color:#c9d1d9;margin-top:.3rem;">~{infra['n_rooftops']} probable rooftops</div>
+          </div>
+
+          <div style="background:#0d1117;border:1px solid #30363d;border-radius:8px;padding:0.9rem;">
+            <div style="color:#00c8ff;font-size:0.75rem;font-weight:700;letter-spacing:.08em;margin-bottom:.4rem;">WATER BODIES</div>
+            <div style="font-size:1.3rem;font-weight:800;color:#e6edf3;">{infra['n_water_bodies']} bodies</div>
+            <div style="font-size:0.8rem;color:#8b949e;margin-top:.2rem;">~{water_area_m2:,.0f} m2 total</div>
+            <div style="font-size:0.82rem;color:#c9d1d9;margin-top:.3rem;">{infra.get('water_pct', 0.0):.1f}% area coverage</div>
+          </div>
+
+          <div style="background:#0d1117;border:1px solid #30363d;border-radius:8px;padding:0.9rem;">
+            <div style="color:#0055ff;font-size:0.75rem;font-weight:700;letter-spacing:.08em;margin-bottom:.4rem;">BRIDGES</div>
+            <div style="font-size:1.3rem;font-weight:800;color:#e6edf3;">{infra['bridge_px']} px</div>
+            <div style="font-size:0.8rem;color:#8b949e;margin-top:.2rem;">detected bridge area</div>
+            <div style="font-size:0.82rem;color:#c9d1d9;margin-top:.3rem;">spatial recovery active</div>
+          </div>
+
+        </div>
         </div>
         """, unsafe_allow_html=True)
 

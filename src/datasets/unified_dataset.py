@@ -10,6 +10,7 @@ Classes:
     1 = Road
     2 = Bridge
     3 = Built-Up Area
+    4 = Water Body
 """
 
 from __future__ import annotations
@@ -100,12 +101,14 @@ PB_CLASS_MAPPING: dict[str, int] = {
     "Road.shp": 1,
     "Bridge.shp": 2,
     "Built_Up_Area_typ.shp": 3,
+    "Water_Body.shp": 4,
 }
 
 CG_CLASS_MAPPING: dict[str, int] = {
     "Road.shp": 1,
     "Bridge.shp": 2,
     "Built_Up_Area_type.shp": 3,
+    "Water_Body.shp": 4,
 }
 
 # Default dataset sources — each dict describes one orthomosaic collection.
@@ -136,6 +139,7 @@ CLASS_NAMES: dict[int, str] = {
     1: "Road",
     2: "Bridge",
     3: "Built-Up Area",
+    4: "Water Body",
 }
 
 
@@ -407,6 +411,30 @@ class UnifiedMultiClassDataset(Dataset):
             indices = rng.choice(len(grid), size=max_val_patches, replace=False)
             indices.sort()
             grid = [grid[i] for i in indices]
+
+        # Guarantee minority-class patches (Bridge=2, Water=4) are in the grid.
+        # Without this, a single minority centroid in a 234K-pixel TIFF has <1.5%
+        # chance of being selected in a 500-patch subsample — producing 0 GT pixels
+        # in validation and making those classes untrackable during training.
+        selected_set = {(ti, gy, gx) for ti, gy, gx in grid}
+        minority_ids = {2, 4}
+        len_before = len(grid)
+        for tiff_idx, entry in enumerate(self.entries):
+            h, w = entry.height, entry.width
+            for cid, cy, cx in self._centroids.get(tiff_idx, []):
+                if cid not in minority_ids:
+                    continue
+                # Snap centroid to its aligned grid cell, clamped to raster boundary
+                y_cell = min(max(0, (cy // ps) * ps), max(0, h - ps))
+                x_cell = min(max(0, (cx // ps) * ps), max(0, w - ps))
+                cell = (tiff_idx, y_cell, x_cell)
+                if cell not in selected_set:
+                    grid.append(cell)
+                    selected_set.add(cell)
+        added = len(grid) - len_before
+        if added:
+            print(f"  + {added} minority-class patch(es) force-added to val grid "
+                  f"(Bridge/Water coverage guaranteed)")
 
         self._val_grid = grid
         print(f"✓ Val grid: {len(self._val_grid)} deterministic patches "

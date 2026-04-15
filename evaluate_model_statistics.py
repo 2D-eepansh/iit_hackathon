@@ -69,12 +69,14 @@ CLASS_NAMES = {
     1: "Road",
     2: "Bridge",
     3: "Built-Up Area",
+    4: "Water Body",
 }
 
 CLASS_IDS = {
     "road": 1,
     "bridge": 2,
     "built_up": 3,
+    "water": 4,
 }
 
 IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
@@ -277,10 +279,10 @@ class MetricsAccumulator:
 
 
 def run_inference(
-    model: torch.nn.Module, val_loader: DataLoader, device: str
+    model: torch.nn.Module, val_loader: DataLoader, device: str, num_classes: int = 5,
 ) -> MetricsAccumulator:
     """Run inference on validation dataset and accumulate metrics."""
-    accumulator = MetricsAccumulator(num_classes=4)
+    accumulator = MetricsAccumulator(num_classes=num_classes)
 
     model.eval()
     num_batches = len(val_loader)
@@ -384,12 +386,13 @@ def format_metrics_summary(metrics: Dict) -> str:
     summary.append("(rows=ground truth, cols=predictions)")
     summary.append("")
     cm = np.array(metrics["confusion_matrix"])
-    header = ["GT \\ Pred"] + [CLASS_NAMES[i][:8] for i in range(4)]
+    n_cls = len(cm)
+    header = ["GT \\ Pred"] + [CLASS_NAMES[i][:8] for i in range(n_cls)]
     summary.append(" ".join(f"{h:>12}" for h in header))
 
-    for i in range(4):
+    for i in range(n_cls):
         row = [CLASS_NAMES[i][:8]]
-        for j in range(4):
+        for j in range(n_cls):
             row.append(str(cm[i, j]))
         summary.append(" ".join(f"{val:>12}" for val in row))
 
@@ -401,12 +404,13 @@ def format_metrics_summary(metrics: Dict) -> str:
     summary.append(f"✓ The AI system correctly classifies {overall_rate * 100:.1f}% of pixels in")
     summary.append("  the validation imagery.")
     summary.append("")
-    summary.append(f"✓ Infrastructure features (roads, bridges, built-up areas) are detected")
+    summary.append(f"✓ Infrastructure features (roads, bridges, built-up areas, water bodies) are detected")
     summary.append(f"  with an average success rate of {avg_infra_rate * 100:.1f}%.")
     summary.append("")
     summary.append(f"✓ Road detection achieved {metrics['infrastructure_detection']['road'] * 100:.1f}% accuracy.")
     summary.append(f"✓ Bridge detection achieved {metrics['infrastructure_detection']['bridge'] * 100:.1f}% accuracy.")
     summary.append(f"✓ Built-up area detection achieved {metrics['infrastructure_detection']['built_up'] * 100:.1f}% accuracy.")
+    summary.append(f"✓ Water body detection achieved {metrics['infrastructure_detection'].get('water', 0.0) * 100:.1f}% accuracy.")
     summary.append("")
     summary.append("=" * 80)
     summary.append("")
@@ -457,7 +461,7 @@ def main():
 
     # 4. Run inference
     start_time = time.time()
-    accumulator = run_inference(model, val_loader, DEVICE)
+    accumulator = run_inference(model, val_loader, DEVICE, num_classes=config["classes"])
     elapsed_time = time.time() - start_time
     print(f"Inference time: {elapsed_time:.2f}s")
     print()

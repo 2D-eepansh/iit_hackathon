@@ -11,8 +11,8 @@ Delete this directory entirely to remove it without affecting training or infere
 
 ```bash
 # From project root
-cd /home/dk/ml_projects/iit_hackathon
-venv/bin/streamlit run demo_ui/app.py
+cd <project_root>
+streamlit run demo_ui/app.py
 ```
 
 Open **http://localhost:8501** in your browser.

@@ -17,7 +17,6 @@ from pathlib import Path
 
 import numpy as np
 import torch
-import torch.nn.functional as F
 
 import rasterio
 from rasterio.windows import Window
@@ -29,16 +28,22 @@ from matplotlib.patches import Patch
 
 sys.path.insert(0, str(Path(__file__).parent))
 from src.models.model_factory import create_model
+from src.postprocessing import postprocess_mask
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CONFIG
 # ─────────────────────────────────────────────────────────────────────────────
-CHECKPOINT   = Path("outputs/checkpoints/best_model.pth")
+BEST_CKPT    = Path("outputs/checkpoints/best_model.pth")
+LATEST_CKPT  = Path("outputs/checkpoints/latest_model.pth")
+BIAS_JSON    = Path("outputs/optimal_bias.json")
 TEST_DIR     = Path("Test/live-demo")
 OUTPUT_DIR   = Path("outputs/test_predictions_live_demo")
 PATCH_SIZE   = 512
-OVERLAP      = 64          # overlap between adjacent patches for smoother borders
-BATCH_SIZE   = 8           # inference batch size
+OVERLAP      = 64
+BATCH_SIZE   = 8
+USE_TTA      = True
+W_BEST       = 0.65
+W_LATEST     = 0.35
 DEVICE       = "cuda" if torch.cuda.is_available() else "cpu"
 
 CLASS_NAMES = {
@@ -46,13 +51,15 @@ CLASS_NAMES = {
     1: "Road",
     2: "Bridge",
     3: "Built-Up Area",
+    4: "Water Body",
 }
 
 COLORS = np.array([
-    [0,   0,   0],      # 0 background   — black
-    [255, 0,   0],      # 1 road         — red
-    [0,   0,   255],    # 2 bridge       — blue
-    [255, 255, 0],      # 3 built-up     — yellow
+    [  0,   0,   0],      # 0 background   — black
+    [255,   0,   0],      # 1 road         — red
+    [  0,   0, 255],      # 2 bridge       — blue
+    [255, 255,   0],      # 3 built-up     — yellow
+    [  0, 200, 255],      # 4 water body   — cyan
 ], dtype=np.uint8)
 
 IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
@@ -63,27 +70,42 @@ IMAGENET_STD  = np.array([0.229, 0.224, 0.225], dtype=np.float32)
 # HELPERS
 # ─────────────────────────────────────────────────────────────────────────────
 
-def load_model(checkpoint_path: Path, device: str) -> torch.nn.Module:
-    """Load trained model from checkpoint."""
-    ckpt = torch.load(str(checkpoint_path), map_location=device, weights_only=False)
-    cfg  = ckpt["config"]
+def load_ensemble(device: str) -> tuple:
+    """Load both checkpoints and optimal bias. Returns (model_best, model_latest, bias_t)."""
+    import json
 
-    model = create_model(
-        architecture=cfg["architecture"],
-        encoder_name=cfg["encoder_name"],
-        encoder_weights=None,          # load from checkpoint, not ImageNet
-        in_channels=3,
-        classes=cfg["classes"],
-    )
-    model.load_state_dict(ckpt["model_state_dict"])
-    model.to(device)
-    model.eval()
+    def _load(path, key):
+        ckpt = torch.load(str(path), map_location=device, weights_only=False)
+        cfg  = ckpt["config"]
+        m = create_model(
+            architecture=cfg["architecture"],
+            encoder_name=cfg["encoder_name"],
+            encoder_weights=None,
+            in_channels=3,
+            classes=cfg["classes"],
+        )
+        m.load_state_dict(ckpt[key])
+        m.to(device).eval()
+        return m, ckpt
 
-    print(f"✓ Model loaded from {checkpoint_path.name}")
-    print(f"  Epoch {ckpt['epoch']}  |  best mIoU {ckpt['best_iou']:.4f}")
-    print(f"  Architecture: {cfg['architecture']}  Encoder: {cfg['encoder_name']}")
-    print(f"  Classes: {cfg['classes']}")
-    return model
+    model_best,   ckpt_b = _load(BEST_CKPT,   "model_state_dict")
+    model_latest, _      = _load(LATEST_CKPT, "ema_state_dict")
+
+    # Load optimised bias
+    bias = [0.0, 1.5, 4.0, 0.0, 0.0]  # fallback
+    if BIAS_JSON.exists():
+        with open(BIAS_JSON) as f:
+            data = json.load(f)
+        bias = data.get("optimal_bias", bias)
+        print(f"  Loaded optimal bias from {BIAS_JSON.name}")
+    else:
+        print(f"  Using default bias (run bias_search.py to tune)")
+    bias_t = torch.tensor(bias, dtype=torch.float32, device=device).view(1, len(CLASS_NAMES), 1, 1)
+
+    print(f"  Ensemble: {BEST_CKPT.name} (ep{ckpt_b['epoch']}, w={W_BEST}) + "
+          f"{LATEST_CKPT.name} (w={W_LATEST})")
+    print(f"  Best mIoU: {ckpt_b['best_iou']:.4f}  Classes: {ckpt_b['config']['classes']}")
+    return model_best, model_latest, bias_t
 
 
 def normalize_patch(patch_rgb: np.ndarray) -> torch.Tensor:
@@ -93,22 +115,13 @@ def normalize_patch(patch_rgb: np.ndarray) -> torch.Tensor:
     return torch.from_numpy(x.transpose(2, 0, 1))   # (3, H, W)
 
 
-def generate_tile_positions(h: int, w: int, patch: int, overlap: int):
-    """Yield (row, col) top-left positions covering the full raster."""
-    stride = patch - overlap
-    rows = list(range(0, h - patch + 1, stride))
-    cols = list(range(0, w - patch + 1, stride))
-    # ensure bottom/right edges are covered
-    if rows[-1] + patch < h:
-        rows.append(h - patch)
-    if cols[-1] + patch < w:
-        cols.append(w - patch)
-    for r in rows:
-        for c in cols:
-            yield r, c
-
-
-def predict_tiff(model: torch.nn.Module, tif_path: Path, device: str) -> tuple:
+def predict_tiff(
+    model_best: torch.nn.Module,
+    model_latest: torch.nn.Module,
+    bias_t: torch.Tensor,
+    tif_path: Path,
+    device: str,
+) -> tuple:
     """
     Run sliding-window inference on a full TIFF using strip-based processing
     to keep memory usage bounded.
@@ -126,7 +139,7 @@ def predict_tiff(model: torch.nn.Module, tif_path: Path, device: str) -> tuple:
         print(f"\n  Raster: {tif_path.name}")
         print(f"  Size: {h}×{w}  Bands: {bands}  CRS: {crs}")
 
-        num_classes = 4
+        num_classes = len(CLASS_NAMES)
         stride = PATCH_SIZE - OVERLAP
 
         # Process in horizontal strips of PATCH_SIZE height
@@ -166,8 +179,19 @@ def predict_tiff(model: torch.nn.Module, tif_path: Path, device: str) -> tuple:
                 if len(batch_imgs) == BATCH_SIZE or c == col_positions[-1]:
                     batch = torch.stack(batch_imgs).to(device)
                     with torch.no_grad(), torch.amp.autocast(device_type="cuda", enabled=(device == "cuda")):
-                        logits = model(batch)
-                    logits_np = logits.cpu().float().numpy()
+                        logits = (W_BEST * model_best(batch).float() +
+                                  W_LATEST * model_latest(batch).float())
+                        if USE_TTA:
+                            b_h = torch.flip(batch, [3])
+                            l_h = torch.flip(W_BEST * model_best(b_h).float() +
+                                             W_LATEST * model_latest(b_h).float(), [3])
+                            b_v = torch.flip(batch, [2])
+                            l_v = torch.flip(W_BEST * model_best(b_v).float() +
+                                             W_LATEST * model_latest(b_v).float(), [2])
+                            logits = (logits + l_h + l_v) / 3.0
+                        # Apply calibrated bias
+                        logits = logits + bias_t
+                    logits_np = logits.cpu().numpy()
 
                     for j, pc in enumerate(batch_cols):
                         strip_logits[:, :, pc:pc+PATCH_SIZE] += logits_np[j]
@@ -272,7 +296,7 @@ def save_visualisation(
     axes[0].set_title("Input Orthomosaic", fontsize=13)
     axes[0].axis("off")
 
-    im = axes[1].imshow(mask_small, cmap="tab10", vmin=0, vmax=3)
+    im = axes[1].imshow(mask_small, cmap="tab10", vmin=0, vmax=len(CLASS_NAMES)-1)
     axes[1].set_title("Predicted Segmentation Mask", fontsize=13)
     axes[1].axis("off")
     plt.colorbar(im, ax=axes[1], fraction=0.046, pad=0.04)
@@ -283,7 +307,7 @@ def save_visualisation(
 
     legend_elements = [
         Patch(facecolor=np.array(COLORS[i]) / 255.0, label=f"{i} — {CLASS_NAMES[i]}")
-        for i in range(4)
+        for i in range(len(CLASS_NAMES))
     ]
     axes[2].legend(handles=legend_elements, loc="lower right", fontsize=9,
                    framealpha=0.8)
@@ -303,7 +327,7 @@ def print_class_stats(pred_mask: np.ndarray, tif_name: str) -> None:
     total = pred_mask.size
     print(f"\n    {'Class':<6} {'Name':<18} {'Pixels':>12}  {'%':>7}")
     print(f"    {'─'*6} {'─'*18} {'─'*12}  {'─'*7}")
-    for cid in range(4):
+    for cid in range(len(CLASS_NAMES)):
         count = int((pred_mask == cid).sum())
         pct   = 100.0 * count / total
         bar   = "█" * int(pct / 2) + "░" * (50 - int(pct / 2))
@@ -329,9 +353,9 @@ def main() -> None:
     for t in test_tifs:
         print(f"  • {t.relative_to(TEST_DIR)}")
 
-    # Load model
+    # Load ensemble
     print()
-    model = load_model(CHECKPOINT, DEVICE)
+    model_best, model_latest, bias_t = load_ensemble(DEVICE)
 
     # Output dir
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -345,9 +369,14 @@ def main() -> None:
         print(f"{'─' * 72}")
 
         t0 = time.time()
-        pred_mask, thumb, profile, shape = predict_tiff(model, tif_path, DEVICE)
+        pred_mask, thumb, profile, shape = predict_tiff(
+            model_best, model_latest, bias_t, tif_path, DEVICE
+        )
         elapsed = time.time() - t0
         print(f"    Inference time: {elapsed:.1f}s")
+
+        # Morphological post-processing (road/water/bridge refinement)
+        pred_mask = postprocess_mask(pred_mask)
 
         # Stats
         print_class_stats(pred_mask, tif_name)

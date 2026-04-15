@@ -1,0 +1,433 @@
+THREE-PERSON DETAILED DEMO SCRIPT (A-Z TECHNICAL WALKTHROUGH)
+==============================================================
+
+Project: SVAMITVA Multi-Class Geospatial Feature Segmentation
+Repository root: <project_root>
+Audience: Judges + technical reviewers + semi-technical evaluators
+Demo style: 3 presenters with explicit role handoffs
+
+
+==============================================================
+SECTION 1 — TEAM ROLES AND FLOW
+==============================================================
+
+Presenter 1 (P1): Problem + system story + architecture + data pipeline
+Presenter 2 (P2): Deep learning details + training strategy + evaluation metrics
+Presenter 3 (P3): Live demo + outputs + deployment + limitations + roadmap
+
+Recommended duration:
+- 10 minute pitch: ~3 min each + 1 min Q&A buffer
+- 15 minute pitch: ~4-5 min each + 2 min Q&A buffer
+
+
+==============================================================
+SECTION 2 — EXACT FILES TO OPEN DURING DEMO (IN ORDER)
+==============================================================
+
+1) README.md
+2) docs/SYSTEM_OVERVIEW.md
+3) docs/ARCHITECTURE.md
+4) src/datasets/unified_dataset.py
+5) src/models/model_factory.py
+6) src/losses/multiclass_loss.py
+7) train.py
+8) src/training/train_one_epoch.py
+9) src/inference/evaluate.py
+10) evaluate_model_statistics.py
+11) outputs/evaluation_report.txt
+12) visualize_training.py
+13) outputs/plots/
+14) test_inference.py
+15) demo_ui/inference_wrapper.py
+16) demo_ui/app.py
+17) src/inference/export_model.py
+18) requirements.txt
+
+
+==============================================================
+SECTION 3 — SPEAKING SCRIPT (WHAT TO SAY / WHAT TO SHOW)
+==============================================================
+
+STEP 1 — INTRODUCTION (P1)
+--------------------------------------------------------------
+SAY:
+Good [morning/afternoon]. We built an AI system for the SVAMITVA context that automatically segments village infrastructure from drone orthomosaics. Our model detects three classes: Road, Bridge, and Built-Up Area, and outputs geospatially aligned prediction masks.
+
+SHOW:
+- README.md (title + problem statement + solution approach)
+
+EXPECTED JUDGE TAKEAWAY:
+This is a practical geospatial AI solution, not a toy image-classification demo.
+
+
+STEP 2 — PROBLEM STATEMENT AND REAL-WORLD CHALLENGE (P1)
+--------------------------------------------------------------
+SAY:
+The core problem is scale and cost of manual mapping. Orthomosaics are extremely large, and annotations are vector shapefiles in geospatial coordinates. So this is both a computer vision problem and a geospatial systems problem.
+
+SHOW:
+- README.md (dataset/problem parts)
+- docs/SYSTEM_OVERVIEW.md (pipeline stages)
+
+EXPECTED JUDGE TAKEAWAY:
+Team understands operational and geospatial constraints.
+
+
+STEP 3 — END-TO-END ARCHITECTURE (P1)
+--------------------------------------------------------------
+SAY:
+Our architecture is: GeoTIFF + shapefile ingestion, on-the-fly rasterization into segmentation masks, deep learning training, and full-image sliding-window inference with georeferenced output masks.
+
+SHOW:
+- docs/ARCHITECTURE.md
+- docs/SYSTEM_OVERVIEW.md
+
+EXPECTED JUDGE TAKEAWAY:
+Clear full-stack ML pipeline from data to deployment artifacts.
+
+
+STEP 4 — DATA PIPELINE IMPLEMENTATION DETAILS (P1)
+--------------------------------------------------------------
+SAY:
+This dataset module is the core geospatial engine. It merges multiple data sources, handles CRS alignment, reads large rasters in windows, rasterizes vector features to pixel masks, and performs minority-aware patch sampling.
+
+SHOW:
+- src/datasets/unified_dataset.py
+  Focus points:
+  - DEFAULT_SOURCES
+  - Class mappings for PB and CG
+  - get_train_transform / get_val_transform
+  - On-the-fly rasterization logic
+  - Class IDs: 0 background, 1 road, 2 bridge, 3 built-up
+
+EXPECTED JUDGE TAKEAWAY:
+Geospatial correctness is built into code path, not post-processed manually.
+
+
+STEP 5 — MODEL ALGORITHM CHOICE (P2)
+--------------------------------------------------------------
+SAY:
+For segmentation we use DeepLabV3+ with a ResNet-50 encoder through segmentation_models_pytorch. This gives strong multi-scale context via ASPP and good boundary reconstruction via decoder layers.
+
+SHOW:
+- src/models/model_factory.py
+  Focus points:
+  - create_model()
+  - architecture default DeepLabV3Plus
+  - encoder resnet50
+  - optional gradient checkpointing
+
+EXPECTED JUDGE TAKEAWAY:
+Model selection is deliberate and production-friendly.
+
+
+STEP 6 — LOSS FUNCTION AND CLASS IMBALANCE STRATEGY (P2)
+--------------------------------------------------------------
+SAY:
+We combine two losses: Focal Loss for hard-example emphasis and class-weighted Dice for overlap quality on foreground classes. Bridge is extremely sparse, and roads are thin structures, so weights are tuned for imbalance.
+
+SHOW:
+- src/losses/multiclass_loss.py
+  Focus points:
+  - SVAMITVA_CLASS_WEIGHTS = [0.1, 1.0, 3.0, 1.2]
+  - SVAMITVA_DICE_WEIGHTS = [2.0, 1.0, 1.0]
+  - Composite: 0.6 * Focal + 0.4 * Dice
+
+EXPECTED JUDGE TAKEAWAY:
+Loss design directly matches dataset imbalance physics.
+
+
+STEP 7 — TRAINING STRATEGY (P2)
+--------------------------------------------------------------
+SAY:
+Training uses mixed precision, gradient accumulation, gradient clipping, differential learning rates, and EMA shadow weights for stable checkpointing.
+
+SHOW:
+- train.py
+  Focus points:
+  - CONFIG dictionary
+  - image_size=768, patches_per_image=150
+  - batch_size=4, accumulation_steps=4
+  - architecture/encoder/classes/seed
+  - EMA class
+  - train/val TIFF split
+
+- src/training/train_one_epoch.py
+  Focus points:
+  - autocast + GradScaler
+  - per-step EMA update
+  - validate_multiclass with per-class IoU
+  - optional multiscale and TTA
+  - optional road morphological refinement (cv2)
+
+EXPECTED JUDGE TAKEAWAY:
+Training is engineered for stability and reproducibility, not only raw accuracy.
+
+
+STEP 8 — EVALUATION METHODOLOGY (P2)
+--------------------------------------------------------------
+SAY:
+We evaluate with per-class IoU and stakeholder metrics like precision, recall, and F1. We provide both a lightweight evaluator and a detailed report generator.
+
+SHOW:
+- src/inference/evaluate.py
+- evaluate_model_statistics.py
+- outputs/evaluation_report.txt
+
+EXPECTED JUDGE TAKEAWAY:
+The project provides transparent and understandable quality metrics.
+
+
+STEP 9 — RESULTS PRESENTATION (P2)
+--------------------------------------------------------------
+SAY:
+From the generated report, Road and Built-Up classes are learned with meaningful IoU/F1. Bridge evaluation remains constrained because validation has zero bridge pixels, which we report explicitly.
+
+SHOW:
+- outputs/evaluation_report.txt (per-class section)
+- outputs/evaluation_report.json (if needed)
+
+EXPECTED JUDGE TAKEAWAY:
+Team reports strengths and limitations honestly.
+
+
+STEP 10 — TRAINING CURVE VISUAL EVIDENCE (P2)
+--------------------------------------------------------------
+SAY:
+We track training curves and per-class behavior over epochs to verify convergence and diagnose class-wise learning dynamics.
+
+SHOW:
+- visualize_training.py
+- outputs/plots/ (loss_curves.png, iou_dice.png, per_class_iou.png, summary_2d.png)
+
+EXPECTED JUDGE TAKEAWAY:
+Evidence-driven model development process.
+
+
+STEP 11 — FULL IMAGE INFERENCE ON TEST RASTERS (P3)
+--------------------------------------------------------------
+SAY:
+Inference runs on full-size GeoTIFFs using sliding windows with overlap, accumulates logits, averages overlaps, and writes georeferenced masks.
+
+SHOW:
+- test_inference.py
+  Focus points:
+  - PATCH_SIZE=512
+  - OVERLAP=64
+  - BATCH_SIZE
+  - checkpoint loading
+  - geospatial output writing
+
+- Test/live-demo/
+- outputs/test_predictions_live_demo/
+
+EXPECTED JUDGE TAKEAWAY:
+Pipeline works on real test orthomosaics, not just patches.
+
+
+STEP 12 — LIVE UI DEMO (P3)
+--------------------------------------------------------------
+SAY:
+For presentation usability, we built a Streamlit demo that loads our checkpoint, runs inference on uploaded images, and displays original image, mask, overlay, and class distribution.
+
+SHOW:
+- demo_ui/inference_wrapper.py
+  Focus points:
+  - model cache
+  - sliding-window predict_image()
+  - class color mapping
+
+- demo_ui/app.py
+  Focus points:
+  - upload flow
+  - Run Inference button
+  - overlay toggle
+  - class distribution and legend
+
+EXPECTED JUDGE TAKEAWAY:
+System is demo-ready and understandable to mixed audiences.
+
+
+STEP 13 — DEPLOYMENT EXPORT (P3)
+--------------------------------------------------------------
+SAY:
+We included export utilities for cleaned checkpoint packaging and ONNX conversion, enabling downstream deployment workflows.
+
+SHOW:
+- src/inference/export_model.py
+
+EXPECTED JUDGE TAKEAWAY:
+Project has a path toward production integration.
+
+
+STEP 14 — LIMITATIONS AND ROADMAP (P3)
+--------------------------------------------------------------
+SAY:
+Current limitations include bridge data scarcity, geographic domain shift risk, and corrupted source TIFF handling. Next steps are bridge-focused data enrichment, domain adaptation, and boundary-aware post-processing.
+
+SHOW:
+- README.md (Known Limitations)
+- docs/EVALUATION.md (validation and metric context)
+
+EXPECTED JUDGE TAKEAWAY:
+Team is realistic, objective, and knows next engineering priorities.
+
+
+STEP 15 — CLOSING (P3)
+--------------------------------------------------------------
+SAY:
+In summary, this project integrates geospatial data engineering, robust semantic segmentation training, and practical inference/demo tooling in one reproducible workflow for infrastructure mapping.
+
+SHOW:
+- README.md
+- outputs/evaluation_report.txt (final metric snapshot)
+
+EXPECTED JUDGE TAKEAWAY:
+Complete, credible, and judge-ready technical solution.
+
+
+==============================================================
+SECTION 4 — A-Z TECHNICAL INVENTORY (EXACTLY WHAT WAS USED)
+==============================================================
+
+A) Problem domain
+- Multi-class semantic segmentation of geospatial orthomosaics
+- Classes: Background, Road, Bridge, Built-Up Area
+
+B) Input data formats
+- Raster imagery: GeoTIFF / TIFF / ECW (dataset context)
+- Labels: shapefiles (.shp with related sidecar files)
+
+C) Data engineering methods
+- Windowed raster reading via rasterio
+- On-the-fly vector reprojection via geopandas/pyproj pathway
+- On-the-fly rasterization using rasterio.features.rasterize
+- Multi-source dataset unification (PB + CG)
+- TIFF-level train/val split
+
+D) Sampling and augmentation
+- Minority-aware centroid sampling
+- Albumentations transforms:
+  - resize
+  - horizontal/vertical flip
+  - random rotate 90
+  - affine transform
+  - gaussian noise / gaussian blur
+  - brightness/contrast + HSV variations
+  - ImageNet normalization
+
+E) Model and deep learning algorithm
+- Architecture: DeepLabV3+
+- Encoder backbone: ResNet-50 (ImageNet pretraining at train setup)
+- Framework: PyTorch + segmentation_models_pytorch
+
+F) Loss functions
+- Focal Loss (gamma=2.0, class alpha weighting)
+- Multi-class Dice Loss (foreground class weighting)
+- Composite objective: 0.6 Focal + 0.4 Dice
+
+G) Optimization and training techniques
+- Optimizer: AdamW
+- Differential LR: lower for encoder, higher for decoder
+- Mixed Precision: torch autocast + GradScaler
+- Gradient accumulation
+- Gradient clipping
+- Learning rate scheduler: ReduceLROnPlateau
+- EMA shadow model for stable checkpointing
+- Deterministic seed control
+
+H) Validation and metrics
+- Per-class IoU
+- Mean foreground IoU
+- Dice metrics
+- Pixel accuracy
+- Per-class precision, recall, F1
+- Confusion matrix reporting
+
+I) Inference strategy
+- Sliding-window inference for arbitrary image sizes
+- Overlap-based tile blending via logit averaging
+- Argmax decoding to class mask
+- Optional morphological refinement for road class in validation pipeline
+
+J) Output artifacts
+- Predicted masks (GeoTIFF with preserved georeference)
+- Visualization PNG panels
+- Evaluation reports (TXT + JSON)
+- Training history JSON
+- Plot suite for model behavior
+
+K) UI and product demo
+- Streamlit application
+- Upload -> infer -> visualize workflow
+- Overlay rendering + class stats + legend
+
+L) Export/deployment
+- Cleaned weights export
+- Config/metrics export
+- ONNX export path
+
+M) Core libraries used (from requirements + code)
+- torch
+- torchvision
+- segmentation_models_pytorch
+- timm
+- rasterio
+- geopandas
+- shapely
+- pyproj
+- fiona
+- albumentations
+- opencv-python-headless
+- numpy
+- matplotlib
+- tqdm
+- streamlit
+- pillow
+
+N) What is NOT present in this repo
+- No explicit database layer
+- No REST API backend service file
+- No containerization files observed (e.g., Dockerfile)
+
+
+==============================================================
+SECTION 5 — QUICK COMMANDS FOR DEMO DAY
+==============================================================
+
+(Use from project root)
+
+1) Install dependencies:
+pip install -r requirements.txt
+
+2) Train model:
+python train.py
+
+3) Generate evaluation report:
+python evaluate_model_statistics.py
+
+4) Plot training curves:
+python visualize_training.py
+
+5) Run test inference:
+python test_inference.py
+
+6) Launch demo UI:
+venv/bin/streamlit run demo_ui/app.py
+
+
+==============================================================
+SECTION 6 — HANDOFF CUES (FOR SMOOTH 3-PERSON DELIVERY)
+==============================================================
+
+P1 -> P2 handoff line:
+Now that we covered the geospatial data and architecture, [Presenter 2] will explain the deep learning algorithm choices, loss engineering, and training strategy.
+
+P2 -> P3 handoff line:
+With the model internals and metrics covered, [Presenter 3] will now run the live inference and UI walkthrough, then close with deployment readiness and roadmap.
+
+P3 closing line:
+Thank you. We are ready for questions on data pipeline, model design, performance metrics, and deployment path.
+
+
+END OF SCRIPT

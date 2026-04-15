@@ -21,7 +21,7 @@ from src.datasets.unified_dataset import (
     get_train_transform,
     get_val_transform,
 )
-from src.losses.multiclass_loss import MultiClassCompositeLoss
+from src.losses.multiclass_loss import MultiClassCompositeLoss, MultiClassCompositeLossV2
 from src.models.model_factory import create_model
 from src.training.train_one_epoch import train_one_epoch, validate_multiclass
 
@@ -53,13 +53,13 @@ CONFIG = {
     "encoder_lr": 1e-5,
     "weight_decay": 1e-4,
     "max_grad_norm": 1.0,
-    "accumulation_steps": 4,    # effective batch 16
+    "accumulation_steps": 8,    # effective batch 32 (was 16) — halves gradient variance
 
     # Model
     "architecture": "DeepLabV3Plus",
     "encoder_name": "resnet50",
     "encoder_weights": "imagenet",
-    "classes": 4,               # 0=Background, 1=Road, 2=Bridge, 3=Built-Up
+    "classes": 5,               # 0=Background, 1=Road, 2=Bridge, 3=Built-Up, 4=Water
     "seed": 42,
     "use_gradient_checkpointing": True,
 
@@ -68,9 +68,14 @@ CONFIG = {
     "use_road_refinement": True,
     "use_tta": False,           # disabled: saves 57% val time per epoch
 
-    # Loss  (Focal + class-weighted Dice)
-    "ce_weight": 0.6,
-    "dice_weight": 0.4,
+    # Loss  (V2: OHEM-CE + label-smoothed conditional Dice)
+    "ce_weight": 0.5,       # ohem_weight in V2
+    "dice_weight": 0.5,     # dice_weight in V2
+    "label_eps": 0.05,      # label smoothing — prevents logit over-confidence
+    "bridge_min_pixels": 100,  # skip bridge Dice when batch has <100 bridge GT px
+
+    # LR warmup
+    "warmup_epochs": 5,     # linear warmup before scheduler takes over
 
     # EMA
     "ema_decay": 0.99,      # ~100 steps window (~2.6 epochs) — meaningful by epoch 5
@@ -230,7 +235,7 @@ def main() -> None:
         print(f"CUDA:          {torch.version.cuda}")
     print(f"Dataset:       Unified PB + CG ({len(TRAIN_TIFFS)} train, {len(VAL_TIFFS)} val TIFFs)")
     print(f"Classes:       {config['classes']}  "
-          "(0=BG, 1=Road, 2=Bridge, 3=Built-Up Area)")
+          "(0=BG, 1=Road, 2=Bridge, 3=Built-Up Area, 4=Water Body)")
     print(f"Reproducibility active: seed={config['seed']}")
     print(f"Model:         {config['architecture']} ({config['encoder_name']} backbone)")
     print(f"Image size:    {config['image_size']}")
@@ -242,6 +247,10 @@ def main() -> None:
     if config.get("use_multiscale_val"):
         print("Multi-scale validation: ENABLED")
     print(f"TTA during training: {'ENABLED' if config.get('use_tta') else 'DISABLED (fast val)'}")
+    print(f"Loss:          V2 — OHEM({config['ce_weight']}) + SmoothedDice({config['dice_weight']})  "
+          f"label_eps={config.get('label_eps', 0.05)}")
+    print(f"Warmup:        {config.get('warmup_epochs', 0)} epochs linear LR warmup")
+    print(f"Scheduler:     ReduceLROnPlateau patience=10 (was 5)")
     print("=" * 80)
 
     # Create dataloaders
@@ -266,11 +275,13 @@ def main() -> None:
     ema = EMA(model, decay=config["ema_decay"])
     print(f"  EMA tracking: ENABLED (decay={config['ema_decay']})")
 
-    # Loss
-    criterion = MultiClassCompositeLoss(
+    # Loss — V2: OHEM-CE + label-smoothed conditional Dice
+    criterion = MultiClassCompositeLossV2(
         num_classes=config["classes"],
-        ce_weight=config["ce_weight"],
+        ohem_weight=config["ce_weight"],
         dice_weight=config["dice_weight"],
+        label_eps=config.get("label_eps", 0.05),
+        bridge_min_pixels=config.get("bridge_min_pixels", 100),
     )
 
     # Optimizer with differential learning rates
@@ -290,6 +301,10 @@ def main() -> None:
         weight_decay=config["weight_decay"],
     )
 
+    # Store initial LR for warmup scheduling
+    for group in optimizer.param_groups:
+        group["initial_lr"] = group["lr"]
+
     # Scheduler
     scheduler_type = config.get("scheduler_type", "plateau")
     if scheduler_type == "cosine":
@@ -298,7 +313,7 @@ def main() -> None:
         )
     else:
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, mode="max", factor=0.5, patience=5,
+            optimizer, mode="max", factor=0.5, patience=10,
             threshold=1e-4, min_lr=1e-6,
         )
 
@@ -371,8 +386,13 @@ def main() -> None:
             use_tta=config.get("use_tta", False),
         )
 
-        # Update scheduler
-        if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
+        # Update scheduler — warmup phase overrides LR directly for first N epochs
+        warmup_epochs = config.get("warmup_epochs", 0)
+        if warmup_epochs > 0 and epoch <= warmup_epochs:
+            factor = epoch / warmup_epochs
+            for group in optimizer.param_groups:
+                group["lr"] = group["initial_lr"] * factor
+        elif isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
             scheduler.step(val_metrics["val_iou"])
         else:
             scheduler.step()
